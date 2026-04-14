@@ -386,7 +386,8 @@ def protect_pdf(
         temp_path = tmp_file.name
 
     doc = fitz.open(temp_path)
-    timestamp = datetime.now().strftime("%m/%d/%Y %I:%M %p")
+    from zoneinfo import ZoneInfo
+timestamp = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p"),
 
     for page in doc:
         rect = page.rect
