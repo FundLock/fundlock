@@ -2,6 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 import tempfile
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import re
 
 
@@ -387,9 +388,7 @@ def protect_pdf(
 
     doc = fitz.open(temp_path)
 
-from zoneinfo import ZoneInfo
-
-timestamp = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
+    timestamp = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
 
     for page in doc:
         rect = page.rect
