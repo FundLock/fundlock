@@ -481,7 +481,7 @@ if uploaded_file is not None:
 
             output_path = protect_pdf(
                 pdf_bytes,
-                business_name.strip() or "Broker"
+                business_name.strip() or "Broker",
                 watermark_text.strip() or "Protected",
                 merchant_emails,
                 merchant_phones,
