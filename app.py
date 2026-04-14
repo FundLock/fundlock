@@ -395,13 +395,14 @@ def protect_pdf(
 
         add_header_and_footer_if_space(page, broker, timestamp)
 
-        page.insert_text(
-            (rect.width / 2 - 150, rect.height / 2 + 50),
-            watermark.upper(),
-            fontsize=60,
-            color=(0.88, 0.88, 0.88),
-            overlay=True,
-        )
+        if watermark:
+            page.insert_text(
+                (rect.width / 2 - 150, rect.height / 2 + 50),
+                watermark.upper(),
+                fontsize=60,
+                color=(0.88, 0.88, 0.88),
+                overlay=True,
+    )
 
         for merchant_email in merchant_emails:
             if merchant_email.strip():
