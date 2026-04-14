@@ -8,7 +8,6 @@ import re
 st.set_page_config(page_title="FundLock", layout="centered")
 
 st.title("MCA FundLock 🔒")
-st.write("NEW VERSION LIVE")
 st.write(
     "Protect your MCA deals before they get shopped. Get more approvals from top lenders—built for brokers, powered by AI."
 )
