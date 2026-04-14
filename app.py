@@ -8,12 +8,19 @@ import re
 st.set_page_config(page_title="FundLock", layout="centered")
 
 st.title("MCA FundLock 🔒")
+st.write("NEW VERSION LIVE")
 st.write(
     "Protect your MCA deals before they get shopped. Get more approvals from top lenders—built for brokers, powered by AI."
 )
 
-broker_name = st.text_input("Business Name", value="GIP Funding")
-watermark_text = st.text_input("Watermark Text", value="GIP Funding")
+business_name = st.text_input(
+    "Business Name",
+    value="",
+    placeholder="e.g., ABC Funding",
+    key="business_name_input_v2"
+)
+
+watermark_text = business_name
 
 uploaded_file = st.file_uploader(
     "Upload your MCA Application",
