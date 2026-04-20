@@ -23,7 +23,7 @@ business_name = st.text_input(
 watermark_text = business_name
 
 uploaded_file = st.file_uploader(
-    "Upload your MCA Application",
+    "Upload your MCA Application (PDF)",
     type=["pdf"]
 )
 
