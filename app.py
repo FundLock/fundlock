@@ -380,7 +380,6 @@ def protect_pdf(
     watermark: str,
     merchant_emails: list[str],
     merchant_phones: list[str],
-    merchant_ssns: list[str],
 ) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(pdf_bytes)
@@ -402,7 +401,7 @@ def protect_pdf(
                 fontsize=60,
                 color=(0.88, 0.88, 0.88),
                 overlay=True,
-    )
+            )
 
         for merchant_email in merchant_emails:
             if merchant_email.strip():
@@ -420,14 +419,6 @@ def protect_pdf(
                     get_replacement(merchant_phone, "phone")
                 )
 
-        for merchant_ssn in merchant_ssns:
-            if merchant_ssn.strip():
-                apply_redaction(
-                    page,
-                    merchant_ssn,
-                    get_replacement(merchant_ssn, "ssn")
-                )
-
         page.apply_redactions()
 
     output_path = temp_path.replace(".pdf", "_protected.pdf")
@@ -439,7 +430,6 @@ def protect_pdf(
 
 merchant_email = ""
 merchant_phone = ""
-merchant_ssn = ""
 
 if uploaded_file is not None:
     pdf_bytes = uploaded_file.read()
@@ -447,7 +437,6 @@ if uploaded_file is not None:
 
     detected_emails = detect_emails(extracted_text)
     detected_phones = detect_phones(extracted_text)
-    detected_ssns = detect_ssns(extracted_text)
 
     deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
     deal_fact_bullets = build_deal_facts_bullets(deal_facts)
@@ -470,16 +459,11 @@ if uploaded_file is not None:
         "Merchant Phone",
         value=", ".join(detected_phones)
     )
-    merchant_ssn = st.text_input(
-        "Merchant SSN / Social",
-        value=", ".join(detected_ssns)
-    )
 
     if st.button("Protect File"):
         try:
             merchant_emails = unique_preserve_order(merchant_email.split(","))
             merchant_phones = unique_preserve_order(merchant_phone.split(","))
-            merchant_ssns = unique_preserve_order(merchant_ssn.split(","))
 
             output_path = protect_pdf(
                 pdf_bytes,
@@ -487,7 +471,6 @@ if uploaded_file is not None:
                 watermark_text.strip(),
                 merchant_emails,
                 merchant_phones,
-                merchant_ssns,
             )
 
             st.success("File protected and masked successfully.")
