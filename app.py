@@ -10,7 +10,7 @@ st.set_page_config(page_title="FundLock", layout="centered")
 
 st.title("MCA FundLock 🔒")
 st.write(
-    "Protect your MCA deals before they get shopped. Get more approvals from top lenders—built for brokers, powered by AI."
+    "Protect your submission window. Reduce deal shopping. Get more approvals."
 )
 
 business_name = st.text_input(
