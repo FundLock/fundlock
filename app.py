@@ -27,6 +27,8 @@ uploaded_file = st.file_uploader(
     type=["pdf"]
 )
 
+st.caption("Documents are processed in real time and never stored.")
+
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -154,6 +156,33 @@ def insert_centered_text(page, y, text, fontsize=8, color=(0.25, 0.25, 0.25)):
     )
 
 
+def insert_responsive_watermark(page, text: str):
+    if not text or not text.strip():
+        return
+
+    rect = page.rect
+    watermark = text.upper().strip()
+
+    fontsize = 60
+    max_width = rect.width - 40
+
+    text_width = fitz.get_text_length(watermark, fontsize=fontsize)
+    while text_width > max_width and fontsize > 18:
+        fontsize -= 2
+        text_width = fitz.get_text_length(watermark, fontsize=fontsize)
+
+    x = max((rect.width - text_width) / 2, 12)
+    y = rect.height / 2
+
+    page.insert_text(
+        (x, y),
+        watermark,
+        fontsize=fontsize,
+        color=(0.88, 0.88, 0.88),
+        overlay=True,
+    )
+
+
 def add_header_and_footer_if_space(page, broker: str, timestamp: str):
     rect = page.rect
 
@@ -270,6 +299,27 @@ def find_value_below_label(lines, label_phrases, pattern, lookahead=3, validator
     return ""
 
 
+def find_credit_score_near_label(lines, label_phrases):
+    idx = find_line_index(lines, label_phrases)
+    if idx is None:
+        return ""
+
+    candidate_lines = []
+    candidate_lines.append(lines[idx])
+
+    if idx + 1 < len(lines):
+        candidate_lines.append(lines[idx + 1])
+
+    for line in candidate_lines:
+        matches = re.findall(r"\b(\d{3})\b", line)
+        for match in matches:
+            candidate = clean_value(match)
+            if is_valid_credit_score(candidate):
+                return candidate
+
+    return ""
+
+
 def is_valid_credit_score(value: str) -> bool:
     if not re.fullmatch(r"\d{3}", value):
         return False
@@ -320,12 +370,9 @@ def extract_deal_facts_from_pdf(pdf_bytes: bytes) -> dict:
             validator=is_valid_mm_yyyy,
         )
 
-        facts["credit_score"] = find_value_below_label(
+        facts["credit_score"] = find_credit_score_near_label(
             lines,
             ["Credit score", "Credit score (If known)", "FICO", "Personal Credit Score"],
-            r"\b(\d{3})\b",
-            lookahead=3,
-            validator=is_valid_credit_score,
         )
 
         facts["monthly_sales"] = find_value_below_label(
@@ -390,18 +437,10 @@ def protect_pdf(
     timestamp = datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
 
     for page in doc:
-        rect = page.rect
-
         add_header_and_footer_if_space(page, broker, timestamp)
 
         if watermark:
-            page.insert_text(
-                (rect.width / 2 - 150, rect.height / 2 + 50),
-                watermark.upper(),
-                fontsize=60,
-                color=(0.88, 0.88, 0.88),
-                overlay=True,
-            )
+            insert_responsive_watermark(page, watermark)
 
         for merchant_email in merchant_emails:
             if merchant_email.strip():
