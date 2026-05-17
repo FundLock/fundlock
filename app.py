@@ -485,23 +485,29 @@ if uploaded_files:
                 "bytes": pdf_bytes
             })
 
-            st.success(f"{uploaded_file.name} uploaded successfully.")
-
         except Exception as e:
             st.error(f"{uploaded_file.name} failed to upload: {e}")
 
     if successful_files:
-        selected_file_name = st.selectbox(
-            "Select document to review and protect",
-            [file["name"] for file in successful_files]
-        )
+        for file in successful_files:
+            st.caption(f"✓ {file['name']}")
 
-        selected_file = next(
-            file for file in successful_files
-            if file["name"] == selected_file_name
-        )
+        if len(successful_files) == 1:
+            selected_file = successful_files[0]
+            selected_file_name = selected_file["name"]
+        else:
+            selected_file_name = st.selectbox(
+                "Select document to review and protect",
+                [file["name"] for file in successful_files]
+            )
+
+            selected_file = next(
+                file for file in successful_files
+                if file["name"] == selected_file_name
+            )
 
         pdf_bytes = selected_file["bytes"]
+        safe_key = re.sub(r"[^A-Za-z0-9_]", "_", selected_file_name)
 
         extracted_text = extract_pdf_text(pdf_bytes)
 
@@ -525,13 +531,13 @@ if uploaded_files:
         merchant_email = st.text_input(
             "Merchant Email",
             value=", ".join(detected_emails),
-            key=f"merchant_email_{selected_file_name}"
+            key=f"merchant_email_{safe_key}"
         )
 
         merchant_phone = st.text_input(
             "Merchant Phone",
             value=", ".join(detected_phones),
-            key=f"merchant_phone_{selected_file_name}"
+            key=f"merchant_phone_{safe_key}"
         )
 
         if st.button("Protect File"):
