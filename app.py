@@ -526,21 +526,6 @@ if uploaded_files:
         detected_emails = unique_preserve_order(all_detected_emails)
         detected_phones = unique_preserve_order(all_detected_phones)
 
-        # Keep Deal Snapshot tied only to the selected document.
-        # This preserves your current logic and avoids pulling noisy facts
-        # from bank statements or support docs.
-        deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
-        deal_fact_bullets = build_deal_facts_bullets(deal_facts)
-
-        st.subheader("Deal Snapshot")
-        st.caption("Snapshot based on application data — not underwriting or legal advice.")
-
-        if deal_fact_bullets:
-            for bullet in deal_fact_bullets:
-                st.markdown(f"- {bullet}")
-        else:
-            st.markdown("- No reliable facts extracted.")
-
         # Only show masking fields if something was detected.
         # Keeps UX close to the original FundLock experience.
         if detected_emails or detected_phones:
@@ -589,3 +574,18 @@ if uploaded_files:
 
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
+
+        # Keep Deal Snapshot tied only to the selected document.
+        # This preserves your current logic and avoids pulling noisy facts
+        # from bank statements or support docs.
+        deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
+        deal_fact_bullets = build_deal_facts_bullets(deal_facts)
+
+        st.subheader("Deal Snapshot")
+        st.caption("Snapshot based on application data — not underwriting or legal advice.")
+
+        if deal_fact_bullets:
+            for bullet in deal_fact_bullets:
+                st.markdown(f"- {bullet}")
+        else:
+            st.markdown("- No reliable facts extracted.")
