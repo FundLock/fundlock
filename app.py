@@ -22,9 +22,10 @@ business_name = st.text_input(
 
 watermark_text = business_name
 
-uploaded_file = st.file_uploader(
-    "Upload your MCA Application (PDF)",
-    type=["pdf"]
+uploaded_files = st.file_uploader(
+    "Upload your MCA Application(s) (PDF)",
+    type=["pdf"],
+    accept_multiple_files=True
 )
 
 st.caption("Documents are processed in real time and never stored.")
@@ -470,57 +471,93 @@ def protect_pdf(
 merchant_email = ""
 merchant_phone = ""
 
-if uploaded_file is not None:
-    pdf_bytes = uploaded_file.read()
-    extracted_text = extract_pdf_text(pdf_bytes)
+if uploaded_files:
+    st.subheader("Uploaded Documents")
 
-    detected_emails = detect_emails(extracted_text)
-    detected_phones = detect_phones(extracted_text)
+    successful_files = []
 
-    deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
-    deal_fact_bullets = build_deal_facts_bullets(deal_facts)
-
-    st.subheader("Deal Snapshot")
-    st.caption("Snapshot based on application data — not underwriting or legal advice.")
-
-    if deal_fact_bullets:
-        for bullet in deal_fact_bullets:
-            st.markdown(f"- {bullet}")
-    else:
-        st.markdown("- No reliable facts extracted.")
-
-    st.subheader("Mask Sensitive Merchant Info")
-    merchant_email = st.text_input(
-        "Merchant Email",
-        value=", ".join(detected_emails)
-    )
-    merchant_phone = st.text_input(
-        "Merchant Phone",
-        value=", ".join(detected_phones)
-    )
-
-    if st.button("Protect File"):
+    for uploaded_file in uploaded_files:
         try:
-            merchant_emails = unique_preserve_order(merchant_email.split(","))
-            merchant_phones = unique_preserve_order(merchant_phone.split(","))
+            pdf_bytes = uploaded_file.getvalue()
 
-            output_path = protect_pdf(
-                pdf_bytes,
-                business_name.strip() or "Broker",
-                watermark_text.strip(),
-                merchant_emails,
-                merchant_phones,
-            )
+            successful_files.append({
+                "name": uploaded_file.name,
+                "bytes": pdf_bytes
+            })
 
-            st.success("File protected and masked successfully.")
-
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    label="Download Protected File",
-                    data=f,
-                    file_name="protected.pdf",
-                    mime="application/pdf",
-                )
+            st.success(f"{uploaded_file.name} uploaded successfully.")
 
         except Exception as e:
-            st.error(f"Something went wrong: {e}")
+            st.error(f"{uploaded_file.name} failed to upload: {e}")
+
+    if successful_files:
+        selected_file_name = st.selectbox(
+            "Select document to review and protect",
+            [file["name"] for file in successful_files]
+        )
+
+        selected_file = next(
+            file for file in successful_files
+            if file["name"] == selected_file_name
+        )
+
+        pdf_bytes = selected_file["bytes"]
+
+        extracted_text = extract_pdf_text(pdf_bytes)
+
+        detected_emails = detect_emails(extracted_text)
+        detected_phones = detect_phones(extracted_text)
+
+        deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
+        deal_fact_bullets = build_deal_facts_bullets(deal_facts)
+
+        st.subheader("Deal Snapshot")
+        st.caption("Snapshot based on application data — not underwriting or legal advice.")
+
+        if deal_fact_bullets:
+            for bullet in deal_fact_bullets:
+                st.markdown(f"- {bullet}")
+        else:
+            st.markdown("- No reliable facts extracted.")
+
+        st.subheader("Mask Sensitive Merchant Info")
+
+        merchant_email = st.text_input(
+            "Merchant Email",
+            value=", ".join(detected_emails),
+            key=f"merchant_email_{selected_file_name}"
+        )
+
+        merchant_phone = st.text_input(
+            "Merchant Phone",
+            value=", ".join(detected_phones),
+            key=f"merchant_phone_{selected_file_name}"
+        )
+
+        if st.button("Protect File"):
+            try:
+                merchant_emails = unique_preserve_order(merchant_email.split(","))
+                merchant_phones = unique_preserve_order(merchant_phone.split(","))
+
+                output_path = protect_pdf(
+                    pdf_bytes,
+                    business_name.strip() or "Broker",
+                    watermark_text.strip(),
+                    merchant_emails,
+                    merchant_phones,
+                )
+
+                st.success(f"{selected_file_name} protected and masked successfully.")
+
+                download_name = selected_file_name.replace(".pdf", "_protected.pdf")
+
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        label="Download Protected File",
+                        data=f,
+                        file_name=download_name,
+                        mime="application/pdf",
+                    )
+
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
