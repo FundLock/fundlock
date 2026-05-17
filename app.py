@@ -509,11 +509,26 @@ if uploaded_files:
         pdf_bytes = selected_file["bytes"]
         safe_key = re.sub(r"[^A-Za-z0-9_]", "_", selected_file_name)
 
-        extracted_text = extract_pdf_text(pdf_bytes)
+        # Detect merchant email/phone from the full uploaded package.
+        # This avoids blank fields when the selected doc has no contact info,
+        # but another uploaded doc does.
+        all_detected_emails = []
+        all_detected_phones = []
 
-        detected_emails = detect_emails(extracted_text)
-        detected_phones = detect_phones(extracted_text)
+        for file in successful_files:
+            try:
+                file_text = extract_pdf_text(file["bytes"])
+                all_detected_emails.extend(detect_emails(file_text))
+                all_detected_phones.extend(detect_phones(file_text))
+            except Exception:
+                pass
 
+        detected_emails = unique_preserve_order(all_detected_emails)
+        detected_phones = unique_preserve_order(all_detected_phones)
+
+        # Keep Deal Snapshot tied only to the selected document.
+        # This preserves your current logic and avoids pulling noisy facts
+        # from bank statements or support docs.
         deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
         deal_fact_bullets = build_deal_facts_bullets(deal_facts)
 
@@ -528,15 +543,23 @@ if uploaded_files:
 
         st.subheader("Mask Sensitive Merchant Info")
 
+        if not detected_emails and not detected_phones:
+            st.caption(
+                "No merchant email or phone was automatically detected. "
+                "You can enter values manually if needed."
+            )
+
         merchant_email = st.text_input(
             "Merchant Email",
             value=", ".join(detected_emails),
+            placeholder="Enter merchant email to mask, if needed",
             key=f"merchant_email_{safe_key}"
         )
 
         merchant_phone = st.text_input(
             "Merchant Phone",
             value=", ".join(detected_phones),
+            placeholder="Enter merchant phone to mask, if needed",
             key=f"merchant_phone_{safe_key}"
         )
 
