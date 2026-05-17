@@ -541,27 +541,26 @@ if uploaded_files:
         else:
             st.markdown("- No reliable facts extracted.")
 
-        st.subheader("Mask Sensitive Merchant Info")
+        # Only show masking fields if something was detected.
+        # Keeps UX close to the original FundLock experience.
+        if detected_emails or detected_phones:
+            st.subheader("Mask Sensitive Merchant Info")
 
-        if not detected_emails and not detected_phones:
-            st.caption(
-                "No merchant email or phone was automatically detected. "
-                "You can enter values manually if needed."
+            merchant_email = st.text_input(
+                "Merchant Email",
+                value=", ".join(detected_emails),
+                key=f"merchant_email_{safe_key}"
             )
 
-        merchant_email = st.text_input(
-            "Merchant Email",
-            value=", ".join(detected_emails),
-            placeholder="Enter merchant email to mask, if needed",
-            key=f"merchant_email_{safe_key}"
-        )
+            merchant_phone = st.text_input(
+                "Merchant Phone",
+                value=", ".join(detected_phones),
+                key=f"merchant_phone_{safe_key}"
+            )
 
-        merchant_phone = st.text_input(
-            "Merchant Phone",
-            value=", ".join(detected_phones),
-            placeholder="Enter merchant phone to mask, if needed",
-            key=f"merchant_phone_{safe_key}"
-        )
+        else:
+            merchant_email = ""
+            merchant_phone = ""
 
         if st.button("Protect File"):
             try:
