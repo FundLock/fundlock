@@ -13,23 +13,15 @@ st.write(
     "Protect your submission window. Reduce deal shopping. Get more approvals."
 )
 
-business_name = st.text_input(
-    "Business Name",
-    value="",
-    placeholder="e.g., ABC Funding",
-    key="business_name_input_v2"
-)
+tab1, tab2 = st.tabs([
+    "Protect Documents",
+    "Document Transfer (Beta)"
+])
 
-watermark_text = business_name
 
-uploaded_files = st.file_uploader(
-    "Upload your MCA Application(s) (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
-
-st.caption("Documents are processed in real time and never stored.")
-
+# =========================
+# SHARED FUNCTIONS
+# =========================
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
@@ -218,6 +210,7 @@ def add_header_and_footer_if_space(page, broker: str, timestamp: str):
 # =========================
 # ULTRA-CONSERVATIVE DEAL FACTS
 # =========================
+
 def clean_value(value: str) -> str:
     if not value:
         return ""
@@ -468,124 +461,312 @@ def protect_pdf(
     return output_path
 
 
-merchant_email = ""
-merchant_phone = ""
+# =========================
+# TAB 1 — EXISTING PROTECT DOCUMENTS WORKFLOW
+# =========================
 
-if uploaded_files:
-    st.subheader("Uploaded Documents")
+with tab1:
 
-    successful_files = []
+    business_name = st.text_input(
+        "Business Name",
+        value="",
+        placeholder="e.g., ABC Funding",
+        key="business_name_input_v2"
+    )
 
-    for uploaded_file in uploaded_files:
-        try:
-            pdf_bytes = uploaded_file.getvalue()
+    watermark_text = business_name
 
-            successful_files.append({
-                "name": uploaded_file.name,
-                "bytes": pdf_bytes
-            })
+    uploaded_files = st.file_uploader(
+        "Upload your MCA Application(s) (PDF)",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
 
-        except Exception as e:
-            st.error(f"{uploaded_file.name} failed to upload: {e}")
+    st.caption("Documents are processed in real time and never stored.")
 
-    if successful_files:
-        for file in successful_files:
-            st.caption(f"✓ {file['name']}")
+    merchant_email = ""
+    merchant_phone = ""
 
-        if len(successful_files) == 1:
-            selected_file = successful_files[0]
-            selected_file_name = selected_file["name"]
-        else:
-            selected_file_name = st.selectbox(
-                "Select document to review and protect",
-                [file["name"] for file in successful_files]
-            )
+    if uploaded_files:
+        st.subheader("Uploaded Documents")
 
-            selected_file = next(
-                file for file in successful_files
-                if file["name"] == selected_file_name
-            )
+        successful_files = []
 
-        pdf_bytes = selected_file["bytes"]
-        safe_key = re.sub(r"[^A-Za-z0-9_]", "_", selected_file_name)
-
-        # Detect merchant email/phone from the full uploaded package.
-        # This avoids blank fields when the selected doc has no contact info,
-        # but another uploaded doc does.
-        all_detected_emails = []
-        all_detected_phones = []
-
-        for file in successful_files:
+        for uploaded_file in uploaded_files:
             try:
-                file_text = extract_pdf_text(file["bytes"])
-                all_detected_emails.extend(detect_emails(file_text))
-                all_detected_phones.extend(detect_phones(file_text))
-            except Exception:
-                pass
+                pdf_bytes = uploaded_file.getvalue()
 
-        detected_emails = unique_preserve_order(all_detected_emails)
-        detected_phones = unique_preserve_order(all_detected_phones)
-
-        # Only show masking fields if something was detected.
-        # Keeps UX close to the original FundLock experience.
-        if detected_emails or detected_phones:
-            st.subheader("Mask Sensitive Merchant Info")
-
-            merchant_email = st.text_input(
-                "Merchant Email",
-                value=", ".join(detected_emails),
-                key=f"merchant_email_{safe_key}"
-            )
-
-            merchant_phone = st.text_input(
-                "Merchant Phone",
-                value=", ".join(detected_phones),
-                key=f"merchant_phone_{safe_key}"
-            )
-
-        else:
-            merchant_email = ""
-            merchant_phone = ""
-
-        if st.button("Protect File"):
-            try:
-                merchant_emails = unique_preserve_order(merchant_email.split(","))
-                merchant_phones = unique_preserve_order(merchant_phone.split(","))
-
-                output_path = protect_pdf(
-                    pdf_bytes,
-                    business_name.strip() or "Broker",
-                    watermark_text.strip(),
-                    merchant_emails,
-                    merchant_phones,
-                )
-
-                st.success(f"{selected_file_name} protected and masked successfully.")
-
-                download_name = selected_file_name.replace(".pdf", "_protected.pdf")
-
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="Download Protected File",
-                        data=f,
-                        file_name=download_name,
-                        mime="application/pdf",
-                    )
+                successful_files.append({
+                    "name": uploaded_file.name,
+                    "bytes": pdf_bytes
+                })
 
             except Exception as e:
-                st.error(f"Something went wrong: {e}")
+                st.error(f"{uploaded_file.name} failed to upload: {e}")
 
-        # Keep Deal Snapshot tied only to the selected document.
-        # This preserves your current logic and avoids pulling noisy facts
-        # from bank statements or support docs.
-        deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
-        deal_fact_bullets = build_deal_facts_bullets(deal_facts)
+        if successful_files:
+            for file in successful_files:
+                st.caption(f"✓ {file['name']}")
 
-        st.subheader("Deal Snapshot")
-        st.caption("Snapshot based on application data — not underwriting or legal advice.")
+            if len(successful_files) == 1:
+                selected_file = successful_files[0]
+                selected_file_name = selected_file["name"]
+            else:
+                selected_file_name = st.selectbox(
+                    "Select document to review and protect",
+                    [file["name"] for file in successful_files]
+                )
 
-        if deal_fact_bullets:
-            for bullet in deal_fact_bullets:
-                st.markdown(f"- {bullet}")
-        else:
-            st.markdown("- No reliable facts extracted.")
+                selected_file = next(
+                    file for file in successful_files
+                    if file["name"] == selected_file_name
+                )
+
+            pdf_bytes = selected_file["bytes"]
+            safe_key = re.sub(r"[^A-Za-z0-9_]", "_", selected_file_name)
+
+            # Detect merchant email/phone from the full uploaded package.
+            # This avoids blank fields when the selected doc has no contact info,
+            # but another uploaded doc does.
+            all_detected_emails = []
+            all_detected_phones = []
+
+            for file in successful_files:
+                try:
+                    file_text = extract_pdf_text(file["bytes"])
+                    all_detected_emails.extend(detect_emails(file_text))
+                    all_detected_phones.extend(detect_phones(file_text))
+                except Exception:
+                    pass
+
+            detected_emails = unique_preserve_order(all_detected_emails)
+            detected_phones = unique_preserve_order(all_detected_phones)
+
+            # Only show masking fields if something was detected.
+            # Keeps UX close to the original FundLock experience.
+            if detected_emails or detected_phones:
+                st.subheader("Mask Sensitive Merchant Info")
+
+                merchant_email = st.text_input(
+                    "Merchant Email",
+                    value=", ".join(detected_emails),
+                    key=f"merchant_email_{safe_key}"
+                )
+
+                merchant_phone = st.text_input(
+                    "Merchant Phone",
+                    value=", ".join(detected_phones),
+                    key=f"merchant_phone_{safe_key}"
+                )
+
+            else:
+                merchant_email = ""
+                merchant_phone = ""
+
+            if st.button("Protect File"):
+                try:
+                    merchant_emails = unique_preserve_order(merchant_email.split(","))
+                    merchant_phones = unique_preserve_order(merchant_phone.split(","))
+
+                    output_path = protect_pdf(
+                        pdf_bytes,
+                        business_name.strip() or "Broker",
+                        watermark_text.strip(),
+                        merchant_emails,
+                        merchant_phones,
+                    )
+
+                    st.success(f"{selected_file_name} protected and masked successfully.")
+
+                    download_name = selected_file_name.replace(".pdf", "_protected.pdf")
+
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            label="Download Protected File",
+                            data=f,
+                            file_name=download_name,
+                            mime="application/pdf",
+                        )
+
+                except Exception as e:
+                    st.error(f"Something went wrong: {e}")
+
+            # Keep Deal Snapshot tied only to the selected document.
+            # This preserves your current logic and avoids pulling noisy facts
+            # from bank statements or support docs.
+            deal_facts = extract_deal_facts_from_pdf(pdf_bytes)
+            deal_fact_bullets = build_deal_facts_bullets(deal_facts)
+
+            st.subheader("Deal Snapshot")
+            st.caption("Snapshot based on application data — not underwriting or legal advice.")
+
+            if deal_fact_bullets:
+                for bullet in deal_fact_bullets:
+                    st.markdown(f"- {bullet}")
+            else:
+                st.markdown("- No reliable facts extracted.")
+
+
+# =========================
+# TAB 2 — DOCUMENT TRANSFER BETA
+# =========================
+
+with tab2:
+
+    st.subheader("Document Transfer (Beta)")
+    st.caption(
+        "Upload a completed application and a blank template to prepare field transfer."
+    )
+
+    st.info(
+        "Beta workflow: extract fields, confirm values, then eventually populate a saved broker or lender template."
+    )
+
+    source_app = st.file_uploader(
+        "Upload completed application",
+        type=["pdf"],
+        key="source_app_beta"
+    )
+
+    target_template = st.file_uploader(
+        "Upload blank broker / lender template",
+        type=["pdf"],
+        key="target_template_beta"
+    )
+
+    template_name = st.text_input(
+        "Template name",
+        placeholder="e.g., Everest Funding App, My Broker App, Lender A",
+        key="template_name_beta"
+    )
+
+    if source_app:
+        st.success("Completed application uploaded.")
+
+    if target_template:
+        st.success("Blank template uploaded.")
+
+    if source_app and target_template:
+
+        st.markdown("---")
+        st.subheader("Field Confirmation")
+
+        st.caption(
+            "Review or manually enter values below. In the next phase, FundLock can use these confirmed values to populate the selected template."
+        )
+
+        source_pdf_bytes = source_app.getvalue()
+
+        try:
+            beta_facts = extract_deal_facts_from_pdf(source_pdf_bytes)
+        except Exception:
+            beta_facts = {
+                "business_start_date": "",
+                "credit_score": "",
+                "monthly_sales": "",
+            }
+
+        try:
+            source_text = extract_pdf_text(source_pdf_bytes)
+            detected_emails_beta = detect_emails(source_text)
+            detected_phones_beta = detect_phones(source_text)
+        except Exception:
+            detected_emails_beta = []
+            detected_phones_beta = []
+
+        confirmed_business_name = st.text_input(
+            "Business Name",
+            value="",
+            key="transfer_business_name"
+        )
+
+        confirmed_owner_name = st.text_input(
+            "Owner Name",
+            value="",
+            key="transfer_owner_name"
+        )
+
+        confirmed_business_address = st.text_input(
+            "Business Address",
+            value="",
+            key="transfer_business_address"
+        )
+
+        confirmed_phone = st.text_input(
+            "Phone",
+            value=", ".join(detected_phones_beta),
+            key="transfer_phone"
+        )
+
+        confirmed_email = st.text_input(
+            "Email",
+            value=", ".join(detected_emails_beta),
+            key="transfer_email"
+        )
+
+        confirmed_credit_score = st.text_input(
+            "Credit Score",
+            value=beta_facts.get("credit_score", ""),
+            key="transfer_credit_score"
+        )
+
+        confirmed_monthly_revenue = st.text_input(
+            "Monthly Revenue",
+            value=format_currency(beta_facts.get("monthly_sales", "")) if beta_facts.get("monthly_sales") else "",
+            key="transfer_monthly_revenue"
+        )
+
+        confirmed_business_start_date = st.text_input(
+            "Business Start Date",
+            value=beta_facts.get("business_start_date", ""),
+            key="transfer_business_start_date"
+        )
+
+        confirmed_years_in_business = st.text_input(
+            "Years in Business",
+            value="",
+            key="transfer_years_in_business"
+        )
+
+        confirmed_ein = st.text_input(
+            "EIN",
+            value="",
+            key="transfer_ein"
+        )
+
+        st.markdown("---")
+
+        save_template = st.checkbox(
+            "Save this as a reusable template later",
+            key="save_template_beta"
+        )
+
+        if st.button("Confirm Fields", key="confirm_fields_beta"):
+
+            confirmed_fields = {
+                "Business Name": confirmed_business_name,
+                "Owner Name": confirmed_owner_name,
+                "Business Address": confirmed_business_address,
+                "Phone": confirmed_phone,
+                "Email": confirmed_email,
+                "Credit Score": confirmed_credit_score,
+                "Monthly Revenue": confirmed_monthly_revenue,
+                "Business Start Date": confirmed_business_start_date,
+                "Years in Business": confirmed_years_in_business,
+                "EIN": confirmed_ein,
+            }
+
+            st.success("Fields confirmed for beta transfer workflow.")
+
+            with st.expander("View confirmed fields"):
+                for field_name, field_value in confirmed_fields.items():
+                    st.write(f"**{field_name}:** {field_value or '—'}")
+
+            if save_template:
+                st.info(
+                    f"Template '{template_name or 'Unnamed Template'}' marked for future reusable template support."
+                )
+
+        st.caption(
+            "Next phase: map these confirmed fields to exact locations on the blank template and generate a completed PDF."
+        )
