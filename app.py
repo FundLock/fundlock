@@ -820,12 +820,15 @@ def normalize_business_address_output(street: str, city_state_zip: str) -> str:
     street = clean_address_value(street)
     city_state_zip = clean_address_value(city_state_zip)
 
+    # Remove OCR junk after a valid 5 digit ZIP.
     zip_code = find_first_valid_zip(city_state_zip)
     if zip_code:
-        # Remove OCR junk after valid ZIP, e.g. "73102 oCo" -> "73102"
         city_state_zip = re.sub(rf"\b{zip_code}\b.*$", zip_code, city_state_zip)
+    else:
+        # If OCR only gave a broken 4 digit ZIP fragment like 7310, remove the fragment.
+        city_state_zip = re.sub(r"\b\d{4}\b.*$", "", city_state_zip).strip(" ,:-")
 
-    # Some PDFs drop the suffix from "Main Street"; this restores a common clean form.
+    # If "Street" was dropped from "Main Street", restore it for clearer output.
     if re.search(r"\bMain\b", street, flags=re.IGNORECASE) and not re.search(
         r"\b(street|st\.|road|rd\.|avenue|ave\.|blvd|drive|dr\.|lane|ln\.|way|court|ct\.)\b",
         street,
@@ -839,9 +842,13 @@ def normalize_business_address_output(street: str, city_state_zip: str) -> str:
 
 def extract_business_address_strict(lines: list[str], full_text: str) -> str:
     """
-    MCA apps often split address across:
+    MCA apps often split business address across:
     Street | City | State | Zip
-    This tries to assemble street + city/state + 5 digit zip.
+
+    Rules:
+    - Street must look like a street address.
+    - ZIP must be a real 5-digit ZIP if shown.
+    - Broken 4-digit ZIP fragments are removed instead of trusted.
     """
     street = ""
     city_state_zip = ""
@@ -851,7 +858,7 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
         idx = find_line_index(lines, ["Business Address", "Street"])
 
     if idx is not None:
-        for j in range(idx + 1, min(len(lines), idx + 6)):
+        for j in range(idx + 1, min(len(lines), idx + 8)):
             candidate = clean_address_value(lines[j])
             if not candidate or is_probably_label_text(candidate):
                 continue
@@ -860,9 +867,15 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
                 street = candidate
                 continue
 
-            if street and not city_state_zip and find_first_valid_zip(candidate):
-                city_state_zip = candidate
-                break
+            if street and not city_state_zip:
+                # Prefer line containing a valid 5-digit ZIP.
+                if find_first_valid_zip(candidate):
+                    city_state_zip = candidate
+                    break
+
+                # If line looks like city/state but has no ZIP, keep it as fallback.
+                if re.search(r"[A-Za-z]{3,}", candidate) and not looks_like_street_address(candidate):
+                    city_state_zip = candidate
 
     # Fallback: locate a street-looking line anywhere, then look nearby for ZIP line.
     if not street:
@@ -870,7 +883,7 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
             candidate = clean_address_value(line)
             if looks_like_street_address(candidate):
                 street = candidate
-                for j in range(i + 1, min(len(lines), i + 5)):
+                for j in range(i + 1, min(len(lines), i + 6)):
                     possible_zip_line = clean_address_value(lines[j])
                     if find_first_valid_zip(possible_zip_line):
                         city_state_zip = possible_zip_line
@@ -880,22 +893,31 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
     if not street:
         return ""
 
-    zip_code = find_first_valid_zip(city_state_zip)
-    city_state = clean_value(city_state_zip)
+    # Last resort: if OCR split ZIP oddly, look anywhere in nearby full text for valid 5-digit ZIP.
+    if not find_first_valid_zip(city_state_zip):
+        zip_from_full_text = find_first_valid_zip(full_text)
+        if zip_from_full_text and zip_from_full_text not in city_state_zip:
+            # Only append ZIP if city/state text exists and does not already contain a broken fragment.
+            if city_state_zip and not re.search(r"\b\d{4}\b", city_state_zip):
+                city_state_zip = f"{city_state_zip} {zip_from_full_text}"
 
-    if zip_code:
-        # Remove duplicate labels and normalize spacing. Preserve city/state words.
-        city_state = re.sub(r"\bZip\b", " ", city_state, flags=re.IGNORECASE)
-        city_state = clean_value(city_state)
+    return normalize_business_address_output(street, city_state_zip)
 
-        # If the street line already contains the ZIP, return normalized first 5 digits.
-        if zip_code in street:
-            return street
+def looks_like_person_name(value: str) -> bool:
+    value = clean_value(value)
 
-        return normalize_business_address_output(street, city_state)
+    if not value:
+        return False
 
-    # Street-only is still useful, but not high confidence.
-    return normalize_business_address_output(street, "")
+    if re.search(
+        r"\d|credit|score|social|security|dob|address|phone|owner|title|percentage|ownership|city|state|zip",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    # 2-4 normal name tokens.
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}", value))
 
 
 def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
@@ -906,25 +928,41 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
         lookahead=4
     )
     cleaned = remove_phone_email_and_labels(raw)
-    if cleaned and not is_probably_label_text(cleaned):
+    if looks_like_person_name(cleaned):
         return cleaned
 
     # MCA owner section often says OWNER 1, then Name, then actual owner name.
     idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
     if idx is not None:
-        for j in range(idx + 1, min(len(lines), idx + 8)):
+        for j in range(idx + 1, min(len(lines), idx + 12)):
             candidate = clean_value(lines[j])
-            if not candidate or is_probably_label_text(candidate):
-                continue
-            # Looks like a person name: 2 words, letters only-ish, not label/date/phone/SSN.
-            if (
-                re.fullmatch(r"[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}", candidate)
-                and not re.search(r"\d|credit|score|social|dob|address", candidate, flags=re.IGNORECASE)
-            ):
-                return candidate
+
+            # Some OCR lines may include multiple values. Pull name-like chunks.
+            chunks = re.split(r"\s{2,}|\t|\|", candidate)
+
+            for chunk in chunks:
+                chunk = clean_value(chunk)
+                chunk = remove_phone_email_and_labels(chunk)
+
+                # Remove known labels that may sit on same line.
+                chunk = re.sub(
+                    r"\b(Name|Credit score|Credit Score|If known|Personal Annual Revenue)\b",
+                    " ",
+                    chunk,
+                    flags=re.IGNORECASE,
+                )
+                chunk = clean_value(chunk)
+
+                if looks_like_person_name(chunk):
+                    return chunk
+
+            # Fallback: find capitalized two-word names inside the line.
+            for match in re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b", candidate):
+                match = clean_value(match)
+                if looks_like_person_name(match):
+                    return match
 
     return ""
-
 
 def parse_business_start_date(start_date: str):
     """
@@ -1021,6 +1059,16 @@ def field_confidence(field_name: str, value: str) -> str:
             return "Needs Review"
         return "Needs Review"
 
+    if field_name == "Industry":
+        if (
+            value
+            and not is_probably_label_text(value)
+            and not re.search(r"yes|no|tax id|seasonal|\d{2}-\d{7}|\d{5}", value, flags=re.IGNORECASE)
+            and re.fullmatch(r"[A-Za-z&/ -]+", value)
+        ):
+            return "Needs Review"
+        return "Missing"
+
     if field_name == "Requested Funding Amount":
         raw = value.replace("$", "").replace(",", "").strip()
         return "High" if is_valid_monthly_sales(raw) else "Needs Review"
@@ -1038,9 +1086,14 @@ def confidence_icon(confidence: str) -> str:
 
 
 def extract_business_type_or_industry(lines: list[str]) -> str:
-    # Prefer explicitly checked business type when available.
+    """
+    Industry is helpful, but not transfer-critical.
+    Only return it when clean/reliable. Otherwise return blank so it stays hidden.
+    """
+
     joined = "\n".join(lines)
 
+    # Safe business-type/entity fallback only when the form clearly marks it.
     checked_patterns = [
         ("LLC", r"(?:☑|✓|■|●|◉|[Xx])\s*L\.?L\.?C\.?"),
         ("Corporation", r"(?:☑|✓|■|●|◉|[Xx])\s*Corporation"),
@@ -1055,11 +1108,11 @@ def extract_business_type_or_industry(lines: list[str]) -> str:
     raw = get_text_after_label_line(
         lines,
         ["Nature of Business", "Industry", "Business Type", "Type of Business"],
-        lookahead=4,
+        lookahead=3,
     )
     cleaned = remove_phone_email_and_labels(raw)
 
-    # Reject rows that are really nearby labels, not industry values.
+    # Reject rows that are really neighboring labels or unrelated values.
     bad_terms = [
         "seasonal business",
         "tax id",
@@ -1068,11 +1121,25 @@ def extract_business_type_or_industry(lines: list[str]) -> str:
         "business address",
         "date/year started",
         "use of funds",
+        "yes",
+        "no",
     ]
+
+    if not cleaned:
+        return ""
+
     if any(term in cleaned.lower() for term in bad_terms):
         return ""
 
-    if cleaned and not is_probably_label_text(cleaned) and len(cleaned.split()) <= 6:
+    if re.search(r"\d{2}-\d{7}|\d{3}-\d{2}-\d{4}|\d{5}", cleaned):
+        return ""
+
+    # Only accept short, normal text like Restaurant, Construction, Retail, Trucking.
+    if (
+        not is_probably_label_text(cleaned)
+        and 1 <= len(cleaned.split()) <= 4
+        and re.fullmatch(r"[A-Za-z&/ -]+", cleaned)
+    ):
         return cleaned
 
     return ""
@@ -1310,12 +1377,22 @@ with tab2:
 
             populated_fields = [
                 field_name for field_name in preferred_order
-                if field_name in extracted_fields and clean_value(extracted_fields.get(field_name, ""))
+                if (
+                    field_name in extracted_fields
+                    and clean_value(extracted_fields.get(field_name, ""))
+                    and field_confidence(field_name, extracted_fields.get(field_name, "")) != "Missing"
+                )
             ]
 
             missing_fields = [
                 field_name for field_name in preferred_order
-                if field_name in extracted_fields and not clean_value(extracted_fields.get(field_name, ""))
+                if (
+                    field_name in extracted_fields
+                    and (
+                        not clean_value(extracted_fields.get(field_name, ""))
+                        or field_confidence(field_name, extracted_fields.get(field_name, "")) == "Missing"
+                    )
+                )
             ]
 
             if populated_fields:
