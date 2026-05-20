@@ -626,7 +626,6 @@ DESTINATION_FIELD_OPTIONS = [
     "Credit Score",
     "Industry",
     "Requested Funding Amount",
-    "Bank Name",
     "Do Not Transfer",
 ]
 
@@ -816,6 +815,28 @@ def clean_address_value(value: str) -> str:
     return clean_value(value)
 
 
+
+def normalize_business_address_output(street: str, city_state_zip: str) -> str:
+    street = clean_address_value(street)
+    city_state_zip = clean_address_value(city_state_zip)
+
+    zip_code = find_first_valid_zip(city_state_zip)
+    if zip_code:
+        # Remove OCR junk after valid ZIP, e.g. "73102 oCo" -> "73102"
+        city_state_zip = re.sub(rf"\b{zip_code}\b.*$", zip_code, city_state_zip)
+
+    # Some PDFs drop the suffix from "Main Street"; this restores a common clean form.
+    if re.search(r"\bMain\b", street, flags=re.IGNORECASE) and not re.search(
+        r"\b(street|st\.|road|rd\.|avenue|ave\.|blvd|drive|dr\.|lane|ln\.|way|court|ct\.)\b",
+        street,
+        flags=re.IGNORECASE,
+    ):
+        street = re.sub(r"\bMain\b", "Main Street", street, flags=re.IGNORECASE)
+
+    if street and city_state_zip:
+        return clean_value(f"{street}, {city_state_zip}")
+    return street
+
 def extract_business_address_strict(lines: list[str], full_text: str) -> str:
     """
     MCA apps often split address across:
@@ -871,10 +892,10 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
         if zip_code in street:
             return street
 
-        return clean_value(f"{street}, {city_state}")
+        return normalize_business_address_output(street, city_state)
 
     # Street-only is still useful, but not high confidence.
-    return street
+    return normalize_business_address_output(street, "")
 
 
 def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
@@ -1020,14 +1041,16 @@ def extract_business_type_or_industry(lines: list[str]) -> str:
     # Prefer explicitly checked business type when available.
     joined = "\n".join(lines)
 
-    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*L\.?L\.?C\.?", joined, flags=re.IGNORECASE):
-        return "LLC"
-    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*Corporation", joined, flags=re.IGNORECASE):
-        return "Corporation"
-    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*Partnership", joined, flags=re.IGNORECASE):
-        return "Partnership"
-    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*Sole Proprietor", joined, flags=re.IGNORECASE):
-        return "Sole Proprietor"
+    checked_patterns = [
+        ("LLC", r"(?:☑|✓|■|●|◉|[Xx])\s*L\.?L\.?C\.?"),
+        ("Corporation", r"(?:☑|✓|■|●|◉|[Xx])\s*Corporation"),
+        ("Partnership", r"(?:☑|✓|■|●|◉|[Xx])\s*Partnership"),
+        ("Sole Proprietor", r"(?:☑|✓|■|●|◉|[Xx])\s*Sole Proprietor"),
+    ]
+
+    for label, pattern in checked_patterns:
+        if re.search(pattern, joined, flags=re.IGNORECASE):
+            return label
 
     raw = get_text_after_label_line(
         lines,
@@ -1035,11 +1058,24 @@ def extract_business_type_or_industry(lines: list[str]) -> str:
         lookahead=4,
     )
     cleaned = remove_phone_email_and_labels(raw)
-    if cleaned and not is_probably_label_text(cleaned):
+
+    # Reject rows that are really nearby labels, not industry values.
+    bad_terms = [
+        "seasonal business",
+        "tax id",
+        "monthly total sales",
+        "advance amount",
+        "business address",
+        "date/year started",
+        "use of funds",
+    ]
+    if any(term in cleaned.lower() for term in bad_terms):
+        return ""
+
+    if cleaned and not is_probably_label_text(cleaned) and len(cleaned.split()) <= 6:
         return cleaned
 
     return ""
-
 
 def extract_requested_funding_amount(lines: list[str]) -> str:
     amount = find_pattern_near_label(
@@ -1098,7 +1134,6 @@ def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
         "Credit Score": credit_score,
         "Industry": extract_business_type_or_industry(lines),
         "Requested Funding Amount": extract_requested_funding_amount(lines),
-        "Bank Name": "",
     }
 
     return fields
@@ -1121,7 +1156,6 @@ def extract_possible_template_labels(pdf_bytes: bytes) -> list[str]:
         ("Credit Score", ["credit score", "fico"]),
         ("Industry", ["industry", "nature of business"]),
         ("Requested Funding Amount", ["advance amount", "funding amount", "amount requested"]),
-        ("Bank Name", ["bank name"]),
     ]
 
     lower_text = text.lower()
@@ -1253,40 +1287,58 @@ with tab2:
             )
 
             st.caption(
-                "Tip: only checked rows will be included in the beta transfer summary. "
-                "Edit any source value before confirming."
+                "Only populated fields are shown by default. Blank fields are still checked behind the scenes, "
+                "but hidden so the broker flow stays clean."
             )
 
             confirmed_matches = []
 
-            with st.expander("Review suggested matches", expanded=True):
-                preferred_order = [
-                    "Business Name",
-                    "Owner Name",
-                    "Business Address",
-                    "Phone",
-                    "Email",
-                    "EIN",
-                    "Business Start Date",
-                    "Years in Business",
-                    "Monthly Revenue",
-                    "Credit Score",
-                    "Industry",
-                    "Requested Funding Amount",
-                    "Bank Name",
-                ]
+            preferred_order = [
+                "Business Name",
+                "Owner Name",
+                "Business Address",
+                "Phone",
+                "Email",
+                "EIN",
+                "Business Start Date",
+                "Years in Business",
+                "Monthly Revenue",
+                "Credit Score",
+                "Industry",
+                "Requested Funding Amount",
+            ]
 
-                for field_name in preferred_order:
-                    if field_name not in extracted_fields:
-                        continue
+            populated_fields = [
+                field_name for field_name in preferred_order
+                if field_name in extracted_fields and clean_value(extracted_fields.get(field_name, ""))
+            ]
 
-                    confirmed_matches.append(
-                        render_transfer_match_row(
-                            field_name,
-                            extracted_fields.get(field_name, ""),
-                            destination_options,
+            missing_fields = [
+                field_name for field_name in preferred_order
+                if field_name in extracted_fields and not clean_value(extracted_fields.get(field_name, ""))
+            ]
+
+            if populated_fields:
+                with st.expander("Review suggested matches", expanded=True):
+                    for field_name in populated_fields:
+                        confirmed_matches.append(
+                            render_transfer_match_row(
+                                field_name,
+                                extracted_fields.get(field_name, ""),
+                                destination_options,
+                            )
                         )
+            else:
+                st.warning("No populated fields were found. Try a clearer completed application PDF.")
+
+            if missing_fields:
+                with st.expander(f"Hidden missing fields ({len(missing_fields)})", expanded=False):
+                    st.caption(
+                        "These fields were not found in the completed app or were blank. "
+                        "They are hidden from the main review to keep the transfer workflow clean."
                     )
+                    for field_name in missing_fields:
+                        st.write(f"❌ {field_name}")
 
             st.markdown("---")
 
