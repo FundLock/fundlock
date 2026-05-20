@@ -912,6 +912,22 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
     return normalize_business_address_output(street, city_state_zip)
 
 def looks_like_person_name(value: str) -> bool:
+    """
+    Strict person-name detection for owner fields.
+
+    Accept:
+    - Daniel Neal
+    - Victoria Veales
+    - John Smith
+    - Mary Ann Jones
+
+    Reject:
+    - AUTHORIZATION GIP FUNDING
+    - Rapha Roots LLC
+    - ABC Capital Group
+    - Name Personal Annual Revenue
+    - Business Information
+    """
     value = clean_value(value)
 
     if not value:
@@ -920,51 +936,47 @@ def looks_like_person_name(value: str) -> bool:
     if re.search(r"\d", value):
         return False
 
-    lowered = value.lower()
-
-    # Reject pure labels/header phrases.
-    bad_exact_or_header_terms = [
-        "name",
-        "personal annual revenue",
-        "credit score",
-        "credit score if known",
-        "if known",
-        "social security",
-        "social security no",
-        "dob",
-        "date of birth",
-        "address",
-        "phone",
-        "home phone",
-        "owner",
-        "title",
-        "percentage",
-        "ownership",
-        "city",
-        "state",
-        "zip",
-        "rent",
-        "own",
-    ]
-
-    if lowered in bad_exact_or_header_terms:
+    # Reject all-caps phrases. Human names from these apps usually come through as Title Case.
+    if value.isupper():
         return False
 
-    # Reject phrases that are clearly headers, not people.
-    for term in bad_exact_or_header_terms:
-        if term in lowered and len(value.split()) <= 5:
-            return False
+    lowered = value.lower()
 
-    # Accept 2-4 normal capitalized name tokens.
-    return bool(re.fullmatch(r"[A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){1,3}", value))
+    # Reject business/entity/header/form words.
+    business_or_form_terms = [
+        "llc", "l.l.c", "inc", "corp", "corporation", "company", "co.",
+        "funding", "capital", "group", "holdings", "partners", "asset",
+        "finance", "financial", "merchant", "advance", "authorization",
+        "business", "information", "application", "applicant", "legal",
+        "dba", "tax", "ein", "revenue", "sales", "bank", "balance",
+        "name personal", "personal annual revenue", "credit score",
+        "if known", "social security", "social security no", "dob",
+        "date of birth", "address", "phone", "home phone", "owner",
+        "title", "percentage", "ownership", "city", "state", "zip",
+        "rent", "own", "please fill", "qualifying questions",
+    ]
+
+    if any(term in lowered for term in business_or_form_terms):
+        return False
+
+    # Accept only 2-4 Title Case name tokens.
+    # This rejects uppercase headers and random label text.
+    return bool(
+        re.fullmatch(
+            r"[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?){1,3}",
+            value,
+        )
+    )
 
 
 def extract_capitalized_person_names(value: str) -> list[str]:
     """
     Pull likely human names from a noisy OCR line.
+
     Examples:
     - 'Daniel Neal 727 Victoria Veales' -> ['Daniel Neal', 'Victoria Veales']
     - 'Name Personal Annual Revenue' -> []
+    - 'AUTHORIZATION GIP FUNDING' -> []
     """
     value = clean_value(value)
 
@@ -973,7 +985,7 @@ def extract_capitalized_person_names(value: str) -> list[str]:
 
     # Remove common header labels before searching.
     value = re.sub(
-        r"\b(Name|Personal Annual Revenue|Credit score|Credit Score|If known|Social Security No\.?|DOB|Address)\b",
+        r"\b(Name|Personal Annual Revenue|Credit score|Credit Score|If known|Social Security No\.?|DOB|Address|Title/Percentage|ownership)\b",
         " ",
         value,
         flags=re.IGNORECASE,
@@ -981,7 +993,12 @@ def extract_capitalized_person_names(value: str) -> list[str]:
     value = clean_value(value)
 
     candidates = []
-    for match in re.findall(r"\b([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){1,3})\b", value):
+
+    # Look only for Title Case names, not ALL CAPS business/header text.
+    for match in re.findall(
+        r"\b([A-Z][a-z]+(?:[-'][A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?){1,3})\b",
+        value,
+    ):
         match = clean_value(match)
         if looks_like_person_name(match):
             candidates.append(match)
@@ -990,7 +1007,7 @@ def extract_capitalized_person_names(value: str) -> list[str]:
 
 
 def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
-    # Generic labels first, but only accept if it is truly a person name.
+    # Generic owner labels first, but only accept if truly person-like.
     raw = get_text_after_label_line(
         lines,
         ["Owner Name", "Principal Name", "Applicant Name", "Owner/Officer Name"],
@@ -1004,11 +1021,13 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
     idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
 
     if idx is not None:
-        owner_window = lines[idx + 1:min(len(lines), idx + 18)]
+        # Keep the owner window intentionally tight so we do not drift into authorization pages.
+        owner_window = lines[idx + 1:min(len(lines), idx + 12)]
 
-        # Pass 1: direct line-by-line scan. This catches clean isolated rows like "Daniel Neal".
+        # Pass 1: direct line-by-line scan. Catches clean isolated rows like "Daniel Neal".
         for line in owner_window:
             candidate = clean_value(line)
+
             if looks_like_person_name(candidate):
                 return candidate
 
@@ -1016,9 +1035,9 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
         for line in owner_window:
             candidate = clean_value(line)
 
-            # Skip rows that are obviously only labels.
+            # Skip rows that are obviously only labels/headers unless they contain title-case names.
             lowered = candidate.lower()
-            if any(label in lowered for label in [
+            is_headerish = any(label in lowered for label in [
                 "personal annual revenue",
                 "credit score",
                 "social security",
@@ -1030,7 +1049,9 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
                 "city/county",
                 "home phone",
                 "rent/own",
-            ]) and not re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", candidate):
+            ])
+
+            if is_headerish and not re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", candidate):
                 continue
 
             chunks = re.split(r"\s{2,}|\t|\|", candidate)
@@ -1045,15 +1066,17 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
                 if names:
                     return names[0]
 
-        # Pass 3: owner window joined together. Useful when OCR merges table text.
+        # Pass 3: joined owner window. Useful when OCR merges table text.
+        # Still uses strict person-vs-business logic.
         owner_text = "\n".join(owner_window)
         names = extract_capitalized_person_names(owner_text)
         if names:
             return names[0]
 
-    # Last fallback: search near OWNER 1 in full text.
+    # Last fallback: search only a small section near OWNER 1 in full text.
+    # Keep it tight to avoid pulling authorization/company headers.
     owner_area_match = re.search(
-        r"OWNER\s*1(.{0,900})",
+        r"OWNER\s*1(.{0,450})",
         full_text,
         flags=re.IGNORECASE | re.DOTALL,
     )
