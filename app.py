@@ -770,28 +770,115 @@ def extract_business_name_strict(lines: list[str], full_text: str) -> str:
     return ""
 
 
-def extract_address_strict(lines: list[str]) -> str:
-    idx = find_line_index(lines, ["Business Address: Street", "Business Address", "Street"])
-    if idx is None:
+def normalize_zip(zip_value: str) -> str:
+    """
+    Keep ZIPs strict:
+    - accepts 5 digit ZIPs
+    - accepts ZIP+4 but returns first 5
+    - rejects anything under 5 digits
+    """
+    if not zip_value:
         return ""
 
-    for j in range(idx + 1, min(len(lines), idx + 4)):
-        candidate = clean_value(lines[j])
-        if not candidate or is_probably_label_text(candidate):
-            continue
+    match = re.search(r"\b(\d{5})(?:-\d{4})?\b", zip_value)
+    return match.group(1) if match else ""
 
-        # Address should have a street number or common street word.
-        if re.search(r"\b\d{1,6}\b", candidate) and re.search(
-            r"\b(street|st\.|road|rd\.|avenue|ave\.|blvd|boulevard|drive|dr\.|lane|ln\.|way|court|ct\.)\b",
-            candidate,
+
+def find_first_valid_zip(text: str) -> str:
+    return normalize_zip(text)
+
+
+def looks_like_street_address(value: str) -> bool:
+    if not value:
+        return False
+
+    return bool(
+        re.search(r"\b\d{1,6}\b", value)
+        and re.search(
+            r"\b(street|st\.|road|rd\.|avenue|ave\.|blvd|boulevard|drive|dr\.|lane|ln\.|way|court|ct\.|main|franks)\b",
+            value,
             flags=re.IGNORECASE,
-        ):
-            return candidate
+        )
+    )
 
-    return ""
+
+def clean_address_value(value: str) -> str:
+    value = clean_value(value)
+    for label in [
+        "Business Address: Street",
+        "Business Address",
+        "Street",
+        "City",
+        "State",
+        "Zip",
+    ]:
+        value = re.sub(re.escape(label), " ", value, flags=re.IGNORECASE)
+    return clean_value(value)
+
+
+def extract_business_address_strict(lines: list[str], full_text: str) -> str:
+    """
+    MCA apps often split address across:
+    Street | City | State | Zip
+    This tries to assemble street + city/state + 5 digit zip.
+    """
+    street = ""
+    city_state_zip = ""
+
+    idx = find_line_index(lines, ["Business Address: Street", "Business Address Street"])
+    if idx is None:
+        idx = find_line_index(lines, ["Business Address", "Street"])
+
+    if idx is not None:
+        for j in range(idx + 1, min(len(lines), idx + 6)):
+            candidate = clean_address_value(lines[j])
+            if not candidate or is_probably_label_text(candidate):
+                continue
+
+            if not street and looks_like_street_address(candidate):
+                street = candidate
+                continue
+
+            if street and not city_state_zip and find_first_valid_zip(candidate):
+                city_state_zip = candidate
+                break
+
+    # Fallback: locate a street-looking line anywhere, then look nearby for ZIP line.
+    if not street:
+        for i, line in enumerate(lines):
+            candidate = clean_address_value(line)
+            if looks_like_street_address(candidate):
+                street = candidate
+                for j in range(i + 1, min(len(lines), i + 5)):
+                    possible_zip_line = clean_address_value(lines[j])
+                    if find_first_valid_zip(possible_zip_line):
+                        city_state_zip = possible_zip_line
+                        break
+                break
+
+    if not street:
+        return ""
+
+    zip_code = find_first_valid_zip(city_state_zip)
+    city_state = clean_value(city_state_zip)
+
+    if zip_code:
+        # Remove duplicate labels and normalize spacing. Preserve city/state words.
+        city_state = re.sub(r"\bZip\b", " ", city_state, flags=re.IGNORECASE)
+        city_state = clean_value(city_state)
+
+        # If the street line already contains the ZIP, return normalized first 5 digits.
+        if zip_code in street:
+            return street
+
+        return clean_value(f"{street}, {city_state}")
+
+    # Street-only is still useful, but not high confidence.
+    return street
 
 
 def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
+    # Generic labels first.
     raw = get_text_after_label_line(
         lines,
         ["Owner Name", "Principal Name", "Applicant Name", "Owner/Officer Name"],
@@ -800,17 +887,56 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
     cleaned = remove_phone_email_and_labels(raw)
     if cleaned and not is_probably_label_text(cleaned):
         return cleaned
+
+    # MCA owner section often says OWNER 1, then Name, then actual owner name.
+    idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
+    if idx is not None:
+        for j in range(idx + 1, min(len(lines), idx + 8)):
+            candidate = clean_value(lines[j])
+            if not candidate or is_probably_label_text(candidate):
+                continue
+            # Looks like a person name: 2 words, letters only-ish, not label/date/phone/SSN.
+            if (
+                re.fullmatch(r"[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}", candidate)
+                and not re.search(r"\d|credit|score|social|dob|address", candidate, flags=re.IGNORECASE)
+            ):
+                return candidate
+
     return ""
 
 
+def parse_business_start_date(start_date: str):
+    """
+    Accepts:
+    - MM/YYYY, like 10/2021
+    - M/YYYY, like 3/2020
+    - YYYY, like 2021
+
+    Year-only assumes January of that year.
+    """
+    start_date = clean_value(start_date)
+
+    if re.fullmatch(r"\d{1,2}/\d{4}", start_date):
+        month, year = start_date.split("/")
+        month = int(month)
+        year = int(year)
+        if 1 <= month <= 12 and 1900 <= year <= datetime.now().year:
+            return year, month
+
+    if re.fullmatch(r"\d{4}", start_date):
+        year = int(start_date)
+        if 1900 <= year <= datetime.now().year:
+            return year, 1
+
+    return None
+
+
 def extract_years_in_business(start_date: str) -> str:
-    if not is_valid_mm_yyyy(start_date):
+    parsed = parse_business_start_date(start_date)
+    if not parsed:
         return ""
 
-    month, year = start_date.split("/")
-    start_year = int(year)
-    start_month = int(month)
-
+    start_year, start_month = parsed
     today = datetime.now()
     months = (today.year - start_year) * 12 + (today.month - start_month)
 
@@ -862,10 +988,21 @@ def field_confidence(field_name: str, value: str) -> str:
             return "High"
         return "Needs Review"
 
+    if field_name == "Years in Business":
+        return "High" if re.search(r"\d", value) else "Needs Review"
+
     if field_name == "Business Address":
-        if re.search(r"\d", value) and len(value) >= 8:
+        has_street = looks_like_street_address(value)
+        has_zip = bool(find_first_valid_zip(value))
+        if has_street and has_zip:
             return "High"
+        if has_street:
+            return "Needs Review"
         return "Needs Review"
+
+    if field_name == "Requested Funding Amount":
+        raw = value.replace("$", "").replace(",", "").strip()
+        return "High" if is_valid_monthly_sales(raw) else "Needs Review"
 
     return "Needs Review"
 
@@ -878,6 +1015,41 @@ def confidence_icon(confidence: str) -> str:
     return "⚠️"
 
 
+
+def extract_business_type_or_industry(lines: list[str]) -> str:
+    # Prefer explicitly checked business type when available.
+    joined = "\n".join(lines)
+
+    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*L\.?L\.?C\.?", joined, flags=re.IGNORECASE):
+        return "LLC"
+    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*Corporation", joined, flags=re.IGNORECASE):
+        return "Corporation"
+    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*Partnership", joined, flags=re.IGNORECASE):
+        return "Partnership"
+    if re.search(r"(?:☑|✓|■|●|◉|[Xx])\s*Sole Proprietor", joined, flags=re.IGNORECASE):
+        return "Sole Proprietor"
+
+    raw = get_text_after_label_line(
+        lines,
+        ["Nature of Business", "Industry", "Business Type", "Type of Business"],
+        lookahead=4,
+    )
+    cleaned = remove_phone_email_and_labels(raw)
+    if cleaned and not is_probably_label_text(cleaned):
+        return cleaned
+
+    return ""
+
+
+def extract_requested_funding_amount(lines: list[str]) -> str:
+    amount = find_pattern_near_label(
+        lines,
+        ["Advance Amount Requested", "Requested Funding Amount", "Funding Amount", "Amount Requested", "Use of Funds"],
+        r"\$?\s*(\d{1,3}(?:,\d{3})+|\d{4,9})\b",
+        lookahead=6,
+    )
+    return format_currency(amount) if amount else ""
+
 def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
     full_text = extract_pdf_text(pdf_bytes)
     lines = extract_pdf_lines_for_transfer(pdf_bytes)
@@ -888,9 +1060,9 @@ def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
     business_start_date = find_pattern_near_label(
         lines,
         ["Date/Year Started", "Business Start Date", "Date Established", "In Business Since"],
-        r"\b(\d{1,2}/\d{4})\b",
+        r"\b(\d{1,2}/\d{4}|\d{4})\b",
         lookahead=5,
-        validator=is_valid_mm_yyyy,
+        validator=lambda v: parse_business_start_date(v) is not None,
     )
 
     monthly_sales = find_pattern_near_label(
@@ -916,7 +1088,7 @@ def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
     fields = {
         "Business Name": extract_business_name_strict(lines, full_text),
         "Owner Name": extract_owner_name_strict(lines, full_text),
-        "Business Address": extract_address_strict(lines),
+        "Business Address": extract_business_address_strict(lines, full_text),
         "Phone": phones[0] if phones else "",
         "Email": emails[0] if emails else "",
         "EIN": ein,
@@ -924,13 +1096,8 @@ def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
         "Years in Business": extract_years_in_business(business_start_date),
         "Monthly Revenue": format_currency(monthly_sales) if monthly_sales else "",
         "Credit Score": credit_score,
-        "Industry": "",
-        "Requested Funding Amount": find_pattern_near_label(
-            lines,
-            ["Advance Amount Requested", "Requested Funding Amount", "Funding Amount"],
-            r"\$?\s*(\d{1,3}(?:,\d{3})+|\d{4,9})\b",
-            lookahead=5,
-        ),
+        "Industry": extract_business_type_or_industry(lines),
+        "Requested Funding Amount": extract_requested_funding_amount(lines),
         "Bank Name": "",
     }
 
@@ -1024,7 +1191,7 @@ with tab2:
     )
 
     st.info(
-        "Broker-friendly beta: high-confidence fields are checked automatically. Missing or questionable fields are flagged for review."
+        "Broker-friendly beta: upload both apps, review only the suggested transfer matches, fix anything missing, then confirm the transfer map."
     )
 
     col1, col2 = st.columns(2)
