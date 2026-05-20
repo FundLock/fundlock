@@ -1024,7 +1024,7 @@ with tab2:
     )
 
     st.info(
-        "Broker-friendly beta: high-confidence fields are checked automatically. Missing or questionable fields are flagged for review instead of being treated as correct."
+        "Broker-friendly beta: high-confidence fields are checked automatically. Missing or questionable fields are flagged for review."
     )
 
     col1, col2 = st.columns(2)
