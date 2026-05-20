@@ -820,15 +820,7 @@ def normalize_business_address_output(street: str, city_state_zip: str) -> str:
     street = clean_address_value(street)
     city_state_zip = clean_address_value(city_state_zip)
 
-    # Remove OCR junk after a valid 5 digit ZIP.
-    zip_code = find_first_valid_zip(city_state_zip)
-    if zip_code:
-        city_state_zip = re.sub(rf"\b{zip_code}\b.*$", zip_code, city_state_zip)
-    else:
-        # If OCR only gave a broken 4 digit ZIP fragment like 7310, remove the fragment.
-        city_state_zip = re.sub(r"\b\d{4}\b.*$", "", city_state_zip).strip(" ,:-")
-
-    # If "Street" was dropped from "Main Street", restore it for clearer output.
+    # Restore common street suffix if OCR separated/dropped it.
     if re.search(r"\bMain\b", street, flags=re.IGNORECASE) and not re.search(
         r"\b(street|st\.|road|rd\.|avenue|ave\.|blvd|drive|dr\.|lane|ln\.|way|court|ct\.)\b",
         street,
@@ -836,9 +828,25 @@ def normalize_business_address_output(street: str, city_state_zip: str) -> str:
     ):
         street = re.sub(r"\bMain\b", "Main Street", street, flags=re.IGNORECASE)
 
-    if street and city_state_zip:
-        return clean_value(f"{street}, {city_state_zip}")
-    return street
+    # If the city/state/zip line contains a valid 5-digit ZIP, cut everything after it.
+    zip_match = re.search(r"\b\d{5}\b", city_state_zip)
+    if zip_match:
+        city_state_zip = city_state_zip[:zip_match.end()]
+    else:
+        # If OCR only gave a broken 4-digit ZIP fragment like 7310, remove that fragment.
+        city_state_zip = re.sub(r"\b\d{4}\b.*$", "", city_state_zip).strip(" ,:-")
+
+    # Remove obvious OCR leftovers after cleanup.
+    city_state_zip = re.sub(r"\s+", " ", city_state_zip).strip(" ,:-")
+    city_state_zip = re.sub(r",\s*[A-Za-z]{1,2}$", "", city_state_zip).strip(" ,:-")
+
+    # If full string accidentally has junk after ZIP, cut again after ZIP.
+    combined = clean_value(f"{street}, {city_state_zip}") if city_state_zip else street
+    zip_match_combined = re.search(r"\b\d{5}\b", combined)
+    if zip_match_combined:
+        combined = combined[:zip_match_combined.end()]
+
+    return clean_value(combined).strip(" ,:-")
 
 def extract_business_address_strict(lines: list[str], full_text: str) -> str:
     """
@@ -909,19 +917,80 @@ def looks_like_person_name(value: str) -> bool:
     if not value:
         return False
 
-    if re.search(
-        r"\d|credit|score|social|security|dob|address|phone|owner|title|percentage|ownership|city|state|zip",
-        value,
-        flags=re.IGNORECASE,
-    ):
+    if re.search(r"\d", value):
         return False
 
-    # 2-4 normal name tokens.
-    return bool(re.fullmatch(r"[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}", value))
+    lowered = value.lower()
+
+    # Reject pure labels/header phrases.
+    bad_exact_or_header_terms = [
+        "name",
+        "personal annual revenue",
+        "credit score",
+        "credit score if known",
+        "if known",
+        "social security",
+        "social security no",
+        "dob",
+        "date of birth",
+        "address",
+        "phone",
+        "home phone",
+        "owner",
+        "title",
+        "percentage",
+        "ownership",
+        "city",
+        "state",
+        "zip",
+        "rent",
+        "own",
+    ]
+
+    if lowered in bad_exact_or_header_terms:
+        return False
+
+    # Reject phrases that are clearly headers, not people.
+    for term in bad_exact_or_header_terms:
+        if term in lowered and len(value.split()) <= 5:
+            return False
+
+    # Accept 2-4 normal capitalized name tokens.
+    return bool(re.fullmatch(r"[A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){1,3}", value))
+
+
+def extract_capitalized_person_names(value: str) -> list[str]:
+    """
+    Pull likely human names from a noisy OCR line.
+    Examples:
+    - 'Daniel Neal 727 Victoria Veales' -> ['Daniel Neal', 'Victoria Veales']
+    - 'Name Personal Annual Revenue' -> []
+    """
+    value = clean_value(value)
+
+    if not value:
+        return []
+
+    # Remove common header labels before searching.
+    value = re.sub(
+        r"\b(Name|Personal Annual Revenue|Credit score|Credit Score|If known|Social Security No\.?|DOB|Address)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = clean_value(value)
+
+    candidates = []
+    for match in re.findall(r"\b([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){1,3})\b", value):
+        match = clean_value(match)
+        if looks_like_person_name(match):
+            candidates.append(match)
+
+    return unique_preserve_order(candidates)
 
 
 def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
-    # Generic labels first.
+    # Generic labels first, but only accept if it is truly a person name.
     raw = get_text_after_label_line(
         lines,
         ["Owner Name", "Principal Name", "Applicant Name", "Owner/Officer Name"],
@@ -931,38 +1000,71 @@ def extract_owner_name_strict(lines: list[str], full_text: str) -> str:
     if looks_like_person_name(cleaned):
         return cleaned
 
-    # MCA owner section often says OWNER 1, then Name, then actual owner name.
+    # Main MCA layout: OWNER 1 section has header row, then values row.
     idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
+
     if idx is not None:
-        for j in range(idx + 1, min(len(lines), idx + 12)):
-            candidate = clean_value(lines[j])
+        owner_window = lines[idx + 1:min(len(lines), idx + 18)]
 
-            # Some OCR lines may include multiple values. Pull name-like chunks.
+        # Pass 1: direct line-by-line scan. This catches clean isolated rows like "Daniel Neal".
+        for line in owner_window:
+            candidate = clean_value(line)
+            if looks_like_person_name(candidate):
+                return candidate
+
+        # Pass 2: split noisy OCR rows into chunks and scan each chunk.
+        for line in owner_window:
+            candidate = clean_value(line)
+
+            # Skip rows that are obviously only labels.
+            lowered = candidate.lower()
+            if any(label in lowered for label in [
+                "personal annual revenue",
+                "credit score",
+                "social security",
+                "dob",
+                "title/percentage",
+                "percentage",
+                "ownership",
+                "address",
+                "city/county",
+                "home phone",
+                "rent/own",
+            ]) and not re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", candidate):
+                continue
+
             chunks = re.split(r"\s{2,}|\t|\|", candidate)
-
             for chunk in chunks:
                 chunk = clean_value(chunk)
                 chunk = remove_phone_email_and_labels(chunk)
 
-                # Remove known labels that may sit on same line.
-                chunk = re.sub(
-                    r"\b(Name|Credit score|Credit Score|If known|Personal Annual Revenue)\b",
-                    " ",
-                    chunk,
-                    flags=re.IGNORECASE,
-                )
-                chunk = clean_value(chunk)
-
                 if looks_like_person_name(chunk):
                     return chunk
 
-            # Fallback: find capitalized two-word names inside the line.
-            for match in re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b", candidate):
-                match = clean_value(match)
-                if looks_like_person_name(match):
-                    return match
+                names = extract_capitalized_person_names(chunk)
+                if names:
+                    return names[0]
+
+        # Pass 3: owner window joined together. Useful when OCR merges table text.
+        owner_text = "\n".join(owner_window)
+        names = extract_capitalized_person_names(owner_text)
+        if names:
+            return names[0]
+
+    # Last fallback: search near OWNER 1 in full text.
+    owner_area_match = re.search(
+        r"OWNER\s*1(.{0,900})",
+        full_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if owner_area_match:
+        owner_area = owner_area_match.group(1)
+        names = extract_capitalized_person_names(owner_area)
+        if names:
+            return names[0]
 
     return ""
+
 
 def parse_business_start_date(start_date: str):
     """
@@ -1041,6 +1143,9 @@ def field_confidence(field_name: str, value: str) -> str:
 
     if field_name == "EIN":
         return "High" if re.fullmatch(r"\d{2}-\d{7}", value) else "Needs Review"
+
+    if field_name == "Owner Name":
+        return "Needs Review" if looks_like_person_name(value) else "Missing"
 
     if field_name == "Business Name":
         if re.search(r"\b(llc|inc|corp|corporation|company|co\.|ltd)\b", value, flags=re.IGNORECASE):
