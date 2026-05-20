@@ -816,9 +816,10 @@ def clean_address_value(value: str) -> str:
 
 
 
-def normalize_business_address_output(street: str, city_state_zip: str) -> str:
+def normalize_business_address_output(street: str, city_state_zip: str, recovered_zip: str = "") -> str:
     street = clean_address_value(street)
     city_state_zip = clean_address_value(city_state_zip)
+    recovered_zip = normalize_zip(recovered_zip)
 
     # Restore common street suffix if OCR separated/dropped it.
     if re.search(r"\bMain\b", street, flags=re.IGNORECASE) and not re.search(
@@ -828,23 +829,41 @@ def normalize_business_address_output(street: str, city_state_zip: str) -> str:
     ):
         street = re.sub(r"\bMain\b", "Main Street", street, flags=re.IGNORECASE)
 
-    # If the city/state/zip line contains a valid 5-digit ZIP, cut everything after it.
     zip_match = re.search(r"\b\d{5}\b", city_state_zip)
+
     if zip_match:
+        # Strict rule: keep the first valid 5-digit ZIP and cut everything after it.
         city_state_zip = city_state_zip[:zip_match.end()]
     else:
-        # If OCR only gave a broken 4-digit ZIP fragment like 7310, remove that fragment.
-        city_state_zip = re.sub(r"\b\d{4}\b.*$", "", city_state_zip).strip(" ,:-")
+        # Repair common OCR issue: 5-digit ZIP is visually present, but text extracted only 4 digits.
+        broken_zip_match = re.search(r"\b(\d{4})\b", city_state_zip)
 
-    # Remove obvious OCR leftovers after cleanup.
+        if broken_zip_match and recovered_zip and recovered_zip.startswith(broken_zip_match.group(1)):
+            city_state_zip = (
+                city_state_zip[:broken_zip_match.start()]
+                + recovered_zip
+            )
+        elif recovered_zip:
+            # If no valid ZIP in the line but the PDF has one nearby, append the recovered strict ZIP.
+            city_state_zip = clean_value(f"{re.sub(r'\\b\\d{4}\\b.*$', '', city_state_zip).strip(' ,:-')} {recovered_zip}")
+        else:
+            # If we cannot repair the ZIP, remove the broken 4-digit fragment entirely.
+            city_state_zip = re.sub(r"\b\d{4}\b.*$", "", city_state_zip).strip(" ,:-")
+
+    # Remove obvious OCR leftovers.
     city_state_zip = re.sub(r"\s+", " ", city_state_zip).strip(" ,:-")
     city_state_zip = re.sub(r",\s*[A-Za-z]{1,2}$", "", city_state_zip).strip(" ,:-")
 
-    # If full string accidentally has junk after ZIP, cut again after ZIP.
     combined = clean_value(f"{street}, {city_state_zip}") if city_state_zip else street
+
+    # Final hard safety: if a 5-digit ZIP exists, cut everything after it.
     zip_match_combined = re.search(r"\b\d{5}\b", combined)
     if zip_match_combined:
         combined = combined[:zip_match_combined.end()]
+
+    # If only a 4-digit ZIP remains, remove it. Never display partial ZIPs.
+    if not re.search(r"\b\d{5}\b", combined):
+        combined = re.sub(r"\b\d{4}\b.*$", "", combined).strip(" ,:-")
 
     return clean_value(combined).strip(" ,:-")
 
@@ -853,21 +872,33 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
     MCA apps often split business address across:
     Street | City | State | Zip
 
-    Rules:
-    - Street must look like a street address.
-    - ZIP must be a real 5-digit ZIP if shown.
-    - Broken 4-digit ZIP fragments are removed instead of trusted.
+    ZIP rules:
+    - Only trust 5-digit ZIPs.
+    - If OCR extracts 4 digits like 7310 but full text contains 73102, repair to 73102.
+    - Never display a 4-digit ZIP fragment.
     """
     street = ""
     city_state_zip = ""
+    recovered_zip = ""
 
     idx = find_line_index(lines, ["Business Address: Street", "Business Address Street"])
     if idx is None:
         idx = find_line_index(lines, ["Business Address", "Street"])
 
+    nearby_lines = []
+
     if idx is not None:
-        for j in range(idx + 1, min(len(lines), idx + 8)):
-            candidate = clean_address_value(lines[j])
+        nearby_lines = lines[idx + 1:min(len(lines), idx + 10)]
+
+        # Try to recover a strict 5-digit ZIP from nearby business-address lines.
+        for line in nearby_lines:
+            z = find_first_valid_zip(line)
+            if z:
+                recovered_zip = z
+                break
+
+        for candidate_line in nearby_lines:
+            candidate = clean_address_value(candidate_line)
             if not candidate or is_probably_label_text(candidate):
                 continue
 
@@ -876,10 +907,15 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
                 continue
 
             if street and not city_state_zip:
-                # Prefer line containing a valid 5-digit ZIP.
+                # Prefer a line with city/state/ZIP info.
                 if find_first_valid_zip(candidate):
                     city_state_zip = candidate
                     break
+
+                # Keep a line with a broken ZIP fragment so normalizer can repair it later.
+                if re.search(r"\b\d{4}\b", candidate):
+                    city_state_zip = candidate
+                    continue
 
                 # If line looks like city/state but has no ZIP, keep it as fallback.
                 if re.search(r"[A-Za-z]{3,}", candidate) and not looks_like_street_address(candidate):
@@ -891,25 +927,42 @@ def extract_business_address_strict(lines: list[str], full_text: str) -> str:
             candidate = clean_address_value(line)
             if looks_like_street_address(candidate):
                 street = candidate
-                for j in range(i + 1, min(len(lines), i + 6)):
-                    possible_zip_line = clean_address_value(lines[j])
-                    if find_first_valid_zip(possible_zip_line):
-                        city_state_zip = possible_zip_line
+                fallback_window = lines[i + 1:min(len(lines), i + 7)]
+
+                for possible_zip_line in fallback_window:
+                    z = find_first_valid_zip(possible_zip_line)
+                    if z:
+                        recovered_zip = z
+                        city_state_zip = clean_address_value(possible_zip_line)
                         break
+
+                if not city_state_zip:
+                    for possible_city_line in fallback_window:
+                        possible_city_line = clean_address_value(possible_city_line)
+                        if re.search(r"\b\d{4}\b", possible_city_line) or re.search(r"[A-Za-z]{3,}", possible_city_line):
+                            city_state_zip = possible_city_line
+                            break
+
                 break
 
     if not street:
         return ""
 
-    # Last resort: if OCR split ZIP oddly, look anywhere in nearby full text for valid 5-digit ZIP.
-    if not find_first_valid_zip(city_state_zip):
-        zip_from_full_text = find_first_valid_zip(full_text)
-        if zip_from_full_text and zip_from_full_text not in city_state_zip:
-            # Only append ZIP if city/state text exists and does not already contain a broken fragment.
-            if city_state_zip and not re.search(r"\b\d{4}\b", city_state_zip):
-                city_state_zip = f"{city_state_zip} {zip_from_full_text}"
+    # Last resort: recover ZIP from full text.
+    if not recovered_zip:
+        # Prefer ZIPs that appear near business address in the full text if possible.
+        business_area = full_text
+        business_match = re.search(
+            r"Business Address.{0,500}",
+            full_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if business_match:
+            business_area = business_match.group(0)
 
-    return normalize_business_address_output(street, city_state_zip)
+        recovered_zip = find_first_valid_zip(business_area)
+
+    return normalize_business_address_output(street, city_state_zip, recovered_zip)
 
 def looks_like_person_name(value: str) -> bool:
     """
@@ -1180,8 +1233,10 @@ def field_confidence(field_name: str, value: str) -> str:
 
     if field_name == "Business Address":
         has_street = looks_like_street_address(value)
-        has_zip = bool(find_first_valid_zip(value))
-        if has_street and has_zip:
+        has_zip = bool(re.search(r"\b\d{5}\b", value))
+        has_partial_zip = bool(re.search(r"\b\d{4}\b", value)) and not has_zip
+
+        if has_street and has_zip and not has_partial_zip:
             return "High"
         if has_street:
             return "Needs Review"
