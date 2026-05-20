@@ -613,160 +613,581 @@ with tab1:
 
 with tab2:
 
-    st.subheader("Document Transfer (Beta)")
+    st.subheader("Transfer App Data (Beta)")
     st.caption(
-        "Upload a completed application and a blank template to prepare field transfer."
+        "Upload a completed MCA app and a blank lender/broker app. FundLock will extract the key values, suggest matches, let you confirm them, and generate a draft completed PDF."
     )
 
-    st.info(
-        "Beta workflow: extract fields, confirm values, then eventually populate a saved broker or lender template."
-    )
+    # -------------------------
+    # TAB 2 ONLY — helper logic
+    # Kept inside Tab 2 so Tab 1 remains untouched.
+    # -------------------------
 
-    source_app = st.file_uploader(
-        "Upload completed application",
-        type=["pdf"],
-        key="source_app_beta"
-    )
+    TRANSFER_FIELDS = [
+        {
+            "field": "Business Name",
+            "key": "business_name",
+            "source_labels": ["Business Name", "Legal Business Name", "Company Name", "DBA", "Merchant Name"],
+            "target_keywords": ["business name", "legal business name", "company name", "dba", "merchant name"],
+        },
+        {
+            "field": "Owner Name",
+            "key": "owner_name",
+            "source_labels": ["Owner Name", "Principal Name", "Applicant Name", "Contact Name", "Owner/Officer"],
+            "target_keywords": ["owner name", "principal", "applicant", "contact name", "owner/officer", "authorized signer"],
+        },
+        {
+            "field": "Business Address",
+            "key": "business_address",
+            "source_labels": ["Business Address", "Physical Address", "Company Address", "Merchant Address", "Street Address"],
+            "target_keywords": ["business address", "physical address", "company address", "merchant address", "street address"],
+        },
+        {
+            "field": "Phone",
+            "key": "phone",
+            "source_labels": ["Phone", "Business Phone", "Cell Phone", "Mobile Phone", "Contact Phone"],
+            "target_keywords": ["phone", "business phone", "cell", "mobile", "contact phone"],
+        },
+        {
+            "field": "Email",
+            "key": "email",
+            "source_labels": ["Email", "Business Email", "Owner Email", "Contact Email"],
+            "target_keywords": ["email", "business email", "owner email", "contact email"],
+        },
+        {
+            "field": "Credit Score",
+            "key": "credit_score",
+            "source_labels": ["Credit Score", "FICO", "Personal Credit Score", "Owner FICO"],
+            "target_keywords": ["credit score", "fico", "personal credit", "owner fico"],
+        },
+        {
+            "field": "Monthly Revenue",
+            "key": "monthly_revenue",
+            "source_labels": ["Monthly Revenue", "Monthly Sales", "Monthly Total Sales", "Gross Monthly Sales", "Average Monthly Revenue"],
+            "target_keywords": ["monthly revenue", "monthly sales", "gross monthly", "average monthly", "monthly total"],
+        },
+        {
+            "field": "Business Start Date",
+            "key": "business_start_date",
+            "source_labels": ["Business Start Date", "Date/Year Started", "Date Established", "In Business Since", "Start Date"],
+            "target_keywords": ["business start", "date/year started", "date established", "in business since", "start date"],
+        },
+        {
+            "field": "Years in Business",
+            "key": "years_in_business",
+            "source_labels": ["Years in Business", "Time in Business", "Yrs in Business"],
+            "target_keywords": ["years in business", "time in business", "yrs in business"],
+        },
+        {
+            "field": "EIN",
+            "key": "ein",
+            "source_labels": ["EIN", "Tax ID", "Federal Tax ID", "FEIN"],
+            "target_keywords": ["ein", "tax id", "federal tax", "fein"],
+        },
+        {
+            "field": "Requested Amount",
+            "key": "requested_amount",
+            "source_labels": ["Requested Amount", "Funding Amount", "Amount Requested", "Amount Needed"],
+            "target_keywords": ["requested amount", "funding amount", "amount requested", "amount needed"],
+        },
+    ]
 
-    target_template = st.file_uploader(
-        "Upload blank broker / lender template",
-        type=["pdf"],
-        key="target_template_beta"
-    )
+    def beta_clean_value(value: str) -> str:
+        if not value:
+            return ""
+        value = value.replace("\xa0", " ")
+        value = re.sub(r"\s+", " ", value)
+        return value.strip(" :-|")
+
+    def beta_open_pdf(pdf_bytes: bytes):
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp_file.write(pdf_bytes)
+        tmp_file.close()
+        return fitz.open(tmp_file.name), tmp_file.name
+
+    def beta_get_page_lines_with_positions(pdf_bytes: bytes):
+        doc, _ = beta_open_pdf(pdf_bytes)
+        rows = []
+
+        for page_num, page in enumerate(doc):
+            words = page.get_text("words", sort=True)
+            words = sorted(words, key=lambda w: (page_num, w[1], w[0]))
+
+            current = []
+            current_y = None
+
+            for word in words:
+                x0, y0, x1, y1, word_text, *_ = word
+
+                if current_y is None:
+                    current_y = y0
+                    current = [(x0, y0, x1, y1, word_text)]
+                    continue
+
+                if abs(y0 - current_y) <= 3:
+                    current.append((x0, y0, x1, y1, word_text))
+                    current_y = (current_y + y0) / 2
+                else:
+                    text_line = " ".join(w[4] for w in sorted(current, key=lambda x: x[0]))
+                    rect = fitz.Rect(
+                        min(w[0] for w in current),
+                        min(w[1] for w in current),
+                        max(w[2] for w in current),
+                        max(w[3] for w in current),
+                    )
+                    cleaned = beta_clean_value(text_line)
+                    if cleaned:
+                        rows.append({
+                            "page": page_num,
+                            "text": cleaned,
+                            "rect": rect,
+                        })
+
+                    current = [(x0, y0, x1, y1, word_text)]
+                    current_y = y0
+
+            if current:
+                text_line = " ".join(w[4] for w in sorted(current, key=lambda x: x[0]))
+                rect = fitz.Rect(
+                    min(w[0] for w in current),
+                    min(w[1] for w in current),
+                    max(w[2] for w in current),
+                    max(w[3] for w in current),
+                )
+                cleaned = beta_clean_value(text_line)
+                if cleaned:
+                    rows.append({
+                        "page": page_num,
+                        "text": cleaned,
+                        "rect": rect,
+                    })
+
+        doc.close()
+        return rows
+
+    def beta_find_value_near_label(lines, labels, max_lookahead=3):
+        for i, row in enumerate(lines):
+            row_text = row["text"]
+            row_lower = row_text.lower()
+
+            for label in labels:
+                label_lower = label.lower()
+
+                if label_lower in row_lower:
+                    # Case 1: label and value are on same line.
+                    after_label = row_text.lower().split(label_lower, 1)
+                    if len(after_label) > 1:
+                        original_after = row_text[len(row_text) - len(after_label[1]):]
+                        original_after = beta_clean_value(original_after)
+                        if original_after and original_after.lower() != label_lower:
+                            return original_after
+
+                    # Case 2: value appears on next few lines.
+                    for j in range(i + 1, min(len(lines), i + 1 + max_lookahead)):
+                        candidate = beta_clean_value(lines[j]["text"])
+                        if not candidate:
+                            continue
+                        if len(candidate) > 80:
+                            continue
+                        if any(other.lower() in candidate.lower() for other in labels):
+                            continue
+                        return candidate
+
+        return ""
+
+    def beta_extract_first_money_value(text: str):
+        matches = re.findall(r"\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\$?\s?\d{4,9}", text)
+        if not matches:
+            return ""
+        return format_currency(matches[0])
+
+    def beta_extract_transfer_fields(pdf_bytes: bytes):
+        text = extract_pdf_text(pdf_bytes)
+        lines = beta_get_page_lines_with_positions(pdf_bytes)
+
+        values = {}
+
+        for field_def in TRANSFER_FIELDS:
+            value = beta_find_value_near_label(lines, field_def["source_labels"])
+            values[field_def["field"]] = beta_clean_value(value)
+
+        # Stronger fallback extraction for common sensitive fields.
+        emails = detect_emails(text)
+        phones = detect_phones(text)
+
+        if emails:
+            values["Email"] = values.get("Email") or emails[0]
+
+        if phones:
+            values["Phone"] = values.get("Phone") or phones[0]
+
+        # Reuse your existing conservative extraction for credit score/start date/monthly sales.
+        try:
+            facts = extract_deal_facts_from_pdf(pdf_bytes)
+
+            if facts.get("credit_score"):
+                values["Credit Score"] = facts["credit_score"]
+
+            if facts.get("monthly_sales"):
+                values["Monthly Revenue"] = format_currency(facts["monthly_sales"])
+
+            if facts.get("business_start_date"):
+                values["Business Start Date"] = facts["business_start_date"]
+
+        except Exception:
+            pass
+
+        # Money fallback for requested amount if label extraction catches a messy line.
+        if values.get("Requested Amount"):
+            money = beta_extract_first_money_value(values["Requested Amount"])
+            if money:
+                values["Requested Amount"] = money
+
+        return values
+
+    def beta_detect_target_fields(pdf_bytes: bytes):
+        lines = beta_get_page_lines_with_positions(pdf_bytes)
+        candidates = []
+
+        keyword_bank = []
+        for field_def in TRANSFER_FIELDS:
+            keyword_bank.extend(field_def["target_keywords"])
+            keyword_bank.extend([field_def["field"].lower()])
+
+        for row in lines:
+            text_line = beta_clean_value(row["text"])
+            lower_line = text_line.lower()
+
+            if len(text_line) > 90:
+                continue
+
+            if any(keyword in lower_line for keyword in keyword_bank):
+                candidates.append({
+                    "label": text_line,
+                    "page": row["page"],
+                    "rect": row["rect"],
+                })
+
+        # Deduplicate labels while preserving first location.
+        seen = set()
+        unique = []
+
+        for item in candidates:
+            key = item["label"].lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+
+        return unique
+
+    def beta_best_target_match(field_def, target_fields):
+        best_label = ""
+        best_score = 0
+
+        for target in target_fields:
+            target_label = target["label"]
+            target_lower = target_label.lower()
+            score = 0
+
+            for keyword in field_def["target_keywords"]:
+                if keyword in target_lower:
+                    score += 3
+
+            for token in field_def["field"].lower().split():
+                if token in target_lower:
+                    score += 1
+
+            if score > best_score:
+                best_score = score
+                best_label = target_label
+
+        if best_score >= 4:
+            confidence = "High"
+        elif best_score >= 2:
+            confidence = "Review"
+        else:
+            confidence = "Missing"
+
+        return best_label, confidence
+
+    def beta_build_mapping_rows(extracted_values, target_fields):
+        rows = []
+
+        for field_def in TRANSFER_FIELDS:
+            field_name = field_def["field"]
+            source_value = extracted_values.get(field_name, "")
+            target_label, confidence = beta_best_target_match(field_def, target_fields)
+
+            if not source_value:
+                confidence = "Missing"
+
+            rows.append({
+                "Use": bool(source_value and target_label),
+                "Field": field_name,
+                "Source Value": source_value,
+                "Destination Match": target_label,
+                "Confidence": confidence,
+            })
+
+        return rows
+
+    def beta_confidence_score(rows):
+        if not rows:
+            return 0
+
+        usable = [row for row in rows if row.get("Source Value")]
+        if not usable:
+            return 0
+
+        high = sum(1 for row in usable if row.get("Confidence") == "High")
+        review = sum(1 for row in usable if row.get("Confidence") == "Review")
+
+        score = int(((high * 1.0) + (review * 0.55)) / len(usable) * 100)
+        return max(0, min(score, 100))
+
+    def beta_find_target_meta(target_fields, label):
+        for target in target_fields:
+            if target["label"] == label:
+                return target
+        return None
+
+    def beta_insert_value_near_label(page, label_rect, value):
+        # Simple beta placement:
+        # first try right of label, then below label if too close to page edge.
+        value = str(value or "").strip()
+        if not value:
+            return
+
+        fontsize = 9
+        x = label_rect.x1 + 12
+        y = label_rect.y1 - 2
+
+        if x > page.rect.width - 180:
+            x = label_rect.x0
+            y = label_rect.y1 + 16
+
+        max_width = page.rect.width - x - 24
+        if max_width < 120:
+            max_width = 120
+
+        page.insert_textbox(
+            fitz.Rect(x, y - 12, min(page.rect.width - 18, x + max_width), y + 18),
+            value,
+            fontsize=fontsize,
+            color=(0, 0, 0),
+            overlay=True,
+        )
+
+    def beta_generate_completed_pdf(target_pdf_bytes, confirmed_rows, target_fields):
+        doc, temp_path = beta_open_pdf(target_pdf_bytes)
+
+        for row in confirmed_rows:
+            if not row.get("Use"):
+                continue
+
+            source_value = row.get("Source Value", "")
+            destination_label = row.get("Destination Match", "")
+
+            if not source_value or not destination_label:
+                continue
+
+            target_meta = beta_find_target_meta(target_fields, destination_label)
+            if not target_meta:
+                continue
+
+            page = doc[target_meta["page"]]
+            beta_insert_value_near_label(page, target_meta["rect"], source_value)
+
+        output_path = temp_path.replace(".pdf", "_fundlock_completed_beta.pdf")
+        doc.save(output_path)
+        doc.close()
+        return output_path
+
+    # -------------------------
+    # Broker-friendly UI
+    # -------------------------
+
+    st.markdown("### 1. Upload documents")
+
+    col_upload_1, col_upload_2 = st.columns(2)
+
+    with col_upload_1:
+        source_app = st.file_uploader(
+            "Completed app",
+            type=["pdf"],
+            key="source_app_beta_v2",
+            help="Upload the app that already has the merchant info."
+        )
+
+    with col_upload_2:
+        target_template = st.file_uploader(
+            "Blank app template",
+            type=["pdf"],
+            key="target_template_beta_v2",
+            help="Upload the blank lender/broker app you want to transfer the info into."
+        )
 
     template_name = st.text_input(
-        "Template name",
-        placeholder="e.g., Everest Funding App, My Broker App, Lender A",
-        key="template_name_beta"
+        "Template nickname",
+        placeholder="e.g., Everest Funding App, Lender A, My Broker App",
+        key="template_name_beta_v2"
     )
 
     if source_app:
-        st.success("Completed application uploaded.")
+        st.success("Completed app uploaded.")
 
     if target_template:
-        st.success("Blank template uploaded.")
+        st.success("Blank app uploaded.")
 
-    if source_app and target_template:
+    if not source_app or not target_template:
+        st.info("Upload both PDFs to start the transfer review.")
+        st.stop()
 
-        st.markdown("---")
-        st.subheader("Field Confirmation")
+    source_pdf_bytes = source_app.getvalue()
+    target_pdf_bytes = target_template.getvalue()
 
-        st.caption(
-            "Review or manually enter values below. In the next phase, FundLock can use these confirmed values to populate the selected template."
-        )
-
-        source_pdf_bytes = source_app.getvalue()
-
+    with st.spinner("Extracting fields and finding matching spots on the blank app..."):
         try:
-            beta_facts = extract_deal_facts_from_pdf(source_pdf_bytes)
-        except Exception:
-            beta_facts = {
-                "business_start_date": "",
-                "credit_score": "",
-                "monthly_sales": "",
-            }
+            extracted_values = beta_extract_transfer_fields(source_pdf_bytes)
+            target_fields = beta_detect_target_fields(target_pdf_bytes)
+            mapping_rows = beta_build_mapping_rows(extracted_values, target_fields)
+        except Exception as e:
+            st.error(f"Could not process the PDFs: {e}")
+            st.stop()
 
-        try:
-            source_text = extract_pdf_text(source_pdf_bytes)
-            detected_emails_beta = detect_emails(source_text)
-            detected_phones_beta = detect_phones(source_text)
-        except Exception:
-            detected_emails_beta = []
-            detected_phones_beta = []
+    score = beta_confidence_score(mapping_rows)
+    high_count = sum(1 for row in mapping_rows if row["Confidence"] == "High" and row["Source Value"])
+    review_count = sum(1 for row in mapping_rows if row["Confidence"] == "Review" and row["Source Value"])
+    missing_count = sum(1 for row in mapping_rows if row["Confidence"] == "Missing" or not row["Source Value"])
 
-        confirmed_business_name = st.text_input(
-            "Business Name",
-            value="",
-            key="transfer_business_name"
-        )
+    st.markdown("---")
+    st.markdown("### 2. Review transfer summary")
 
-        confirmed_owner_name = st.text_input(
-            "Owner Name",
-            value="",
-            key="transfer_owner_name"
-        )
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Confidence", f"{score}%")
+    metric_2.metric("High", high_count)
+    metric_3.metric("Review", review_count)
+    metric_4.metric("Missing", missing_count)
 
-        confirmed_business_address = st.text_input(
-            "Business Address",
-            value="",
-            key="transfer_business_address"
-        )
+    if score >= 85:
+        st.success("Most fields look ready. Review anything yellow before generating the completed PDF.")
+    elif score >= 60:
+        st.warning("Some fields need review. Confirm the destination matches before generating the completed PDF.")
+    else:
+        st.error("This template needs manual review. FundLock found limited confident matches.")
 
-        confirmed_phone = st.text_input(
-            "Phone",
-            value=", ".join(detected_phones_beta),
-            key="transfer_phone"
-        )
+    st.markdown("### 3. Confirm field matches")
+    st.caption("Edit values if needed. Choose the destination field on the blank app. Uncheck anything you do not want transferred.")
 
-        confirmed_email = st.text_input(
-            "Email",
-            value=", ".join(detected_emails_beta),
-            key="transfer_email"
-        )
+    target_options = [""] + [target["label"] for target in target_fields]
 
-        confirmed_credit_score = st.text_input(
-            "Credit Score",
-            value=beta_facts.get("credit_score", ""),
-            key="transfer_credit_score"
-        )
+    confirmed_rows = []
+    fields_needing_review = [
+        row for row in mapping_rows
+        if row["Confidence"] != "High" or not row["Source Value"] or not row["Destination Match"]
+    ]
 
-        confirmed_monthly_revenue = st.text_input(
-            "Monthly Revenue",
-            value=format_currency(beta_facts.get("monthly_sales", "")) if beta_facts.get("monthly_sales") else "",
-            key="transfer_monthly_revenue"
-        )
+    if fields_needing_review:
+        st.warning(f"{len(fields_needing_review)} fields need review before this is dummy-proof.")
 
-        confirmed_business_start_date = st.text_input(
-            "Business Start Date",
-            value=beta_facts.get("business_start_date", ""),
-            key="transfer_business_start_date"
-        )
+    with st.expander("Review suggested matches", expanded=True):
+        for idx, row in enumerate(mapping_rows):
+            field_name = row["Field"]
+            confidence = row["Confidence"]
 
-        confirmed_years_in_business = st.text_input(
-            "Years in Business",
-            value="",
-            key="transfer_years_in_business"
-        )
+            if confidence == "High":
+                badge = "✅ High"
+            elif confidence == "Review":
+                badge = "⚠️ Review"
+            else:
+                badge = "❌ Missing"
 
-        confirmed_ein = st.text_input(
-            "EIN",
-            value="",
-            key="transfer_ein"
-        )
+            st.markdown(f"**{field_name}** — {badge}")
 
-        st.markdown("---")
+            col_use, col_value, col_dest = st.columns([1, 3, 3])
 
-        save_template = st.checkbox(
-            "Save this as a reusable template later",
-            key="save_template_beta"
-        )
-
-        if st.button("Confirm Fields", key="confirm_fields_beta"):
-
-            confirmed_fields = {
-                "Business Name": confirmed_business_name,
-                "Owner Name": confirmed_owner_name,
-                "Business Address": confirmed_business_address,
-                "Phone": confirmed_phone,
-                "Email": confirmed_email,
-                "Credit Score": confirmed_credit_score,
-                "Monthly Revenue": confirmed_monthly_revenue,
-                "Business Start Date": confirmed_business_start_date,
-                "Years in Business": confirmed_years_in_business,
-                "EIN": confirmed_ein,
-            }
-
-            st.success("Fields confirmed for beta transfer workflow.")
-
-            with st.expander("View confirmed fields"):
-                for field_name, field_value in confirmed_fields.items():
-                    st.write(f"**{field_name}:** {field_value or '—'}")
-
-            if save_template:
-                st.info(
-                    f"Template '{template_name or 'Unnamed Template'}' marked for future reusable template support."
+            with col_use:
+                use_field = st.checkbox(
+                    "Use",
+                    value=bool(row["Use"]),
+                    key=f"beta_use_{idx}_{field_name}"
                 )
 
-        st.caption(
-            "Next phase: map these confirmed fields to exact locations on the blank template and generate a completed PDF."
-        )
+            with col_value:
+                source_value = st.text_input(
+                    "Source value",
+                    value=row["Source Value"],
+                    key=f"beta_value_{idx}_{field_name}"
+                )
+
+            with col_dest:
+                default_index = 0
+                if row["Destination Match"] in target_options:
+                    default_index = target_options.index(row["Destination Match"])
+
+                destination_match = st.selectbox(
+                    "Destination on blank app",
+                    options=target_options,
+                    index=default_index,
+                    key=f"beta_dest_{idx}_{field_name}"
+                )
+
+            confirmed_rows.append({
+                "Use": use_field,
+                "Field": field_name,
+                "Source Value": source_value,
+                "Destination Match": destination_match,
+                "Confidence": confidence,
+            })
+
+            st.markdown("---")
+
+    with st.expander("Detected destination labels on blank app"):
+        if target_fields:
+            for target in target_fields:
+                st.write(f"- Page {target['page'] + 1}: {target['label']}")
+        else:
+            st.write("No obvious labels detected. You may need a cleaner blank PDF template.")
+
+    st.markdown("### 4. Generate draft completed app")
+
+    st.caption(
+        "Beta note: this writes values near the detected labels on the blank PDF. Some templates may need manual adjustment if their layout is unusual or scanned."
+    )
+
+    ready_count = sum(
+        1 for row in confirmed_rows
+        if row["Use"] and row["Source Value"] and row["Destination Match"]
+    )
+
+    st.write(f"Ready to transfer **{ready_count}** fields.")
+
+    if st.button("Generate Completed App PDF", key="generate_completed_transfer_beta"):
+        try:
+            output_path = beta_generate_completed_pdf(
+                target_pdf_bytes,
+                confirmed_rows,
+                target_fields
+            )
+
+            download_base = template_name.strip() or "completed_app"
+            download_name = re.sub(r"[^A-Za-z0-9_-]+", "_", download_base).strip("_")
+            if not download_name:
+                download_name = "completed_app"
+
+            st.success("Draft completed app generated.")
+
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    label="Download Completed App PDF",
+                    data=f,
+                    file_name=f"{download_name}_fundlock_completed_beta.pdf",
+                    mime="application/pdf",
+                )
+
+        except Exception as e:
+            st.error(f"Could not generate completed PDF: {e}")
+
+    st.caption(
+        "Recommended beta workflow: review yellow/red fields only, generate the draft, then visually check the completed PDF before sending anywhere."
+    )
