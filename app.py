@@ -1615,10 +1615,18 @@ with tab2:
 
                 with st.expander("View confirmed transfer map", expanded=True):
                     for match in usable_matches:
-                        st.write(
+
+                        if match["field"] == match["destination"]:
+                            st.write(
+                                f"**{match['destination']}**: "
+                                f"{match['value']}"
+                            )
+
+                        else:
+                            st.write(
                                 f"**{match['field']}** → **{match['destination']}**: "
                                 f"{match['value']}"
-                        )
+                             )
 
 
                 st.caption(
