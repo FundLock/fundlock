@@ -1616,9 +1616,8 @@ with tab2:
                 with st.expander("View confirmed transfer map", expanded=True):
                     for match in usable_matches:
                         st.write(
-                            f"**{match['field']}** → **{match['destination']}**: "
-                            f"{match['value']} "
-                            f"({match['confidence']})"
+                                f"**{match['field']}** → **{match['destination']}**: "
+                                f"{match['value']}"
                         )
 
 
