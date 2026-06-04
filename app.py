@@ -1463,6 +1463,121 @@ def render_transfer_match_row(field_name: str, value: str, destination_options: 
     }
 
 
+
+# =========================
+# TAB 2 — TMT PDF FILLING HELPERS
+# Added as a next step only. Existing extraction/review/mapping flow is unchanged.
+# =========================
+
+# Coordinate profile for the TMT blank application.
+# Important: these are the only values you should need to tune after your first test download.
+# PyMuPDF coordinates use points: x moves left→right, y moves top→bottom.
+TMT_FIELD_COORDS = {
+    "Business Name": {"page": 0, "rect": (110, 118, 340, 136), "fontsize": 8},
+    "Business Address": {"page": 0, "rect": (110, 145, 360, 174), "fontsize": 7},
+    "Phone": {"page": 0, "rect": (390, 145, 555, 162), "fontsize": 8},
+    "Email": {"page": 0, "rect": (390, 170, 555, 188), "fontsize": 7},
+    "EIN": {"page": 0, "rect": (110, 205, 230, 222), "fontsize": 8},
+    "Business Start Date": {"page": 0, "rect": (390, 205, 500, 222), "fontsize": 8},
+    "Years in Business": {"page": 0, "rect": (500, 205, 575, 222), "fontsize": 7},
+    "Monthly Revenue": {"page": 0, "rect": (110, 235, 230, 252), "fontsize": 8},
+    "Requested Funding Amount": {"page": 0, "rect": (390, 235, 520, 252), "fontsize": 8},
+    "Industry": {"page": 0, "rect": (110, 265, 330, 282), "fontsize": 8},
+    "Owner Name": {"page": 0, "rect": (110, 345, 300, 363), "fontsize": 8},
+    "Credit Score": {"page": 0, "rect": (390, 345, 470, 363), "fontsize": 8},
+}
+
+
+def draw_text_in_rect(page, rect_tuple, value: str, fontsize: int = 8):
+    """Insert reviewed transfer value inside a fixed PDF rectangle."""
+    value = clean_value(value)
+    if not value:
+        return
+
+    rect = fitz.Rect(*rect_tuple)
+    page.insert_textbox(
+        rect,
+        value,
+        fontsize=fontsize,
+        color=(0, 0, 0),
+        align=0,
+        overlay=True,
+    )
+
+
+def write_value_near_label_fallback(doc, destination: str, value: str) -> bool:
+    """
+    Fallback writer if a destination is not in TMT_FIELD_COORDS.
+    This does not replace the TMT coordinate map; it only prevents the flow from failing.
+    """
+    value = clean_value(value)
+    if not value or not destination:
+        return False
+
+    for page in doc:
+        label_hits = page.search_for(destination)
+        for rect in label_hits:
+            x = rect.x1 + 8
+            y = rect.y1 - 2
+
+            if x > page.rect.width - 160:
+                x = rect.x0
+                y = rect.y1 + 14
+
+            page.insert_text(
+                (x, y),
+                value,
+                fontsize=8,
+                color=(0, 0, 0),
+                overlay=True,
+            )
+            return True
+
+    return False
+
+
+def fill_tmt_pdf_with_confirmed_matches(target_pdf_bytes: bytes, matches: list[dict]) -> str:
+    """
+    Takes the broker-reviewed confirmed matches and writes them into the TMT blank app.
+    This is intentionally separate from extraction/mapping so Tab 2's working steps stay stable.
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(target_pdf_bytes)
+        temp_path = tmp_file.name
+
+    doc = fitz.open(temp_path)
+
+    for match in matches:
+        if not match.get("use"):
+            continue
+
+        destination = match.get("destination", "")
+        value = clean_value(match.get("value", ""))
+
+        if not value or destination == "Do Not Transfer":
+            continue
+
+        coord = TMT_FIELD_COORDS.get(destination)
+
+        if coord:
+            page_index = coord.get("page", 0)
+            if 0 <= page_index < len(doc):
+                page = doc[page_index]
+                draw_text_in_rect(
+                    page,
+                    coord["rect"],
+                    value,
+                    fontsize=coord.get("fontsize", 8),
+                )
+        else:
+            write_value_near_label_fallback(doc, destination, value)
+
+    output_path = temp_path.replace(".pdf", "_tmt_filled.pdf")
+    doc.save(output_path)
+    doc.close()
+
+    return output_path
+
 # =========================
 # TAB 2 — DOCUMENT TRANSFER BETA
 # =========================
@@ -1629,9 +1744,45 @@ with tab2:
                              )
 
 
+                st.session_state["tmt_confirmed_transfer_matches"] = usable_matches
+                st.session_state["tmt_target_pdf_bytes"] = target_pdf_bytes
+                st.session_state["tmt_target_file_name"] = target_template.name
+
                 st.caption(
-                    "Next phase: use these confirmed mappings to write values into exact boxes on the blank PDF."
+                    "Confirmed. Next step unlocked below: create the filled TMT application from this reviewed map."
                 )
+
+            if st.session_state.get("tmt_confirmed_transfer_matches"):
+                st.markdown("---")
+                st.subheader("Next Step: Create Filled TMT Application")
+                st.caption(
+                    "This uses only the reviewed/confirmed values above and writes them into the TMT blank app."
+                )
+
+                if st.button("Create Filled TMT App", key="create_filled_tmt_app_beta_strict"):
+                    try:
+                        filled_pdf_path = fill_tmt_pdf_with_confirmed_matches(
+                            st.session_state["tmt_target_pdf_bytes"],
+                            st.session_state["tmt_confirmed_transfer_matches"],
+                        )
+
+                        st.success("Filled TMT application created.")
+
+                        download_name = st.session_state.get(
+                            "tmt_target_file_name",
+                            "TMT_APP_Blank.pdf",
+                        ).replace(".pdf", "_filled.pdf")
+
+                        with open(filled_pdf_path, "rb") as f:
+                            st.download_button(
+                                label="Download Filled TMT Application",
+                                data=f,
+                                file_name=download_name,
+                                mime="application/pdf",
+                            )
+
+                    except Exception as e:
+                        st.error(f"Could not create filled TMT application: {e}")
 
         else:
             st.warning("No fields were extracted. Try a clearer completed application PDF.")
