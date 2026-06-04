@@ -1466,26 +1466,196 @@ def render_transfer_match_row(field_name: str, value: str, destination_options: 
 
 # =========================
 # TAB 2 — TMT PDF FILLING HELPERS
-# Added as a next step only. Existing extraction/review/mapping flow is unchanged.
+# Surgical next step only: extraction/review/mapping above remains unchanged.
+# This section converts reviewed generic fields into exact TMT boxes.
 # =========================
 
-# Coordinate profile for the TMT blank application.
-# Important: these are the only values you should need to tune after your first test download.
-# PyMuPDF coordinates use points: x moves left→right, y moves top→bottom.
+# TMT coordinate profile for the uploaded TMT blank application.
+# PyMuPDF coordinates use PDF points: x moves left→right, y moves top→bottom.
+# These coordinates intentionally write only into supported TMT boxes so values do not drift
+# into the wrong fields like City, Business Address, or Services Sold.
 TMT_FIELD_COORDS = {
-    "Business Name": {"page": 0, "rect": (110, 118, 340, 136), "fontsize": 8},
-    "Business Address": {"page": 0, "rect": (110, 145, 360, 174), "fontsize": 7},
-    "Phone": {"page": 0, "rect": (390, 145, 555, 162), "fontsize": 8},
-    "Email": {"page": 0, "rect": (390, 170, 555, 188), "fontsize": 7},
-    "EIN": {"page": 0, "rect": (110, 205, 230, 222), "fontsize": 8},
-    "Business Start Date": {"page": 0, "rect": (390, 205, 500, 222), "fontsize": 8},
-    "Years in Business": {"page": 0, "rect": (500, 205, 575, 222), "fontsize": 7},
-    "Monthly Revenue": {"page": 0, "rect": (110, 235, 230, 252), "fontsize": 8},
-    "Requested Funding Amount": {"page": 0, "rect": (390, 235, 520, 252), "fontsize": 8},
-    "Industry": {"page": 0, "rect": (110, 265, 330, 282), "fontsize": 8},
-    "Owner Name": {"page": 0, "rect": (110, 345, 300, 363), "fontsize": 8},
-    "Credit Score": {"page": 0, "rect": (390, 345, 470, 363), "fontsize": 8},
+    # Basic Information
+    "business_name": {"page": 0, "rect": (82, 112, 250, 133), "fontsize": 8},
+    "first_name": {"page": 0, "rect": (58, 166, 190, 187), "fontsize": 8},
+    "last_name": {"page": 0, "rect": (210, 166, 345, 187), "fontsize": 8},
+    "phone": {"page": 0, "rect": (390, 141, 555, 158), "fontsize": 8},
+    "email": {"page": 0, "rect": (388, 171, 556, 188), "fontsize": 7},
+
+    # Business Information section
+    "services_sold": {"page": 0, "rect": (360, 322, 552, 339), "fontsize": 8},
+    "business_street": {"page": 0, "rect": (58, 356, 270, 377), "fontsize": 8},
+    "business_state": {"page": 0, "rect": (287, 356, 345, 377), "fontsize": 8},
+    "business_city": {"page": 0, "rect": (365, 356, 466, 377), "fontsize": 8},
+    "business_zip": {"page": 0, "rect": (482, 356, 552, 377), "fontsize": 8},
+    "business_start_date": {"page": 0, "rect": (58, 406, 190, 428), "fontsize": 8},
+
+    # Ownership Verification section
+    "ein": {"page": 0, "rect": (327, 506, 438, 527), "fontsize": 8},
 }
+
+
+def split_owner_name_for_tmt(owner_name: str) -> tuple[str, str]:
+    """Split a reviewed owner name into TMT First Name / Last Name boxes."""
+    owner_name = clean_value(owner_name)
+    if not owner_name:
+        return "", ""
+
+    # Remove accidental extra data if it was pasted into the owner field.
+    owner_name = re.sub(r"\b\d{3}\b", " ", owner_name)
+    owner_name = re.sub(r"\b\d{2}-\d{7}\b", " ", owner_name)
+    owner_name = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", " ", owner_name)
+    owner_name = clean_value(owner_name)
+
+    parts = owner_name.split()
+    if len(parts) == 1:
+        return parts[0], ""
+
+    first_name = parts[0]
+    last_name = " ".join(parts[1:])
+    return first_name, last_name
+
+
+def parse_business_address_for_tmt(address: str) -> dict:
+    """
+    Split reviewed Business Address into TMT street/state/city/zip boxes.
+
+    Handles common formats:
+    - 629 W Main Street Oklahoma 73102
+    - 629 W Main Street, Oklahoma City, OK 73102
+    - 629 W Main Street Oklahoma City OK 73102
+    """
+    address = clean_value(address)
+
+    result = {
+        "street": "",
+        "city": "",
+        "state": "",
+        "zip": "",
+    }
+
+    if not address:
+        return result
+
+    zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", address)
+    if zip_match:
+        result["zip"] = zip_match.group(1)
+        before_zip = clean_value(address[:zip_match.start()].strip(" ,"))
+    else:
+        before_zip = address
+
+    state_match = re.search(r"\b([A-Z]{2})\b\s*$", before_zip)
+    if state_match:
+        result["state"] = state_match.group(1)
+        before_zip = clean_value(before_zip[:state_match.start()].strip(" ,"))
+
+    # Prefer comma-separated parsing when available.
+    parts = [clean_value(p) for p in before_zip.split(",") if clean_value(p)]
+
+    if len(parts) >= 2:
+        result["street"] = parts[0]
+        city_candidate = parts[-1]
+        if not result["state"]:
+            state_in_city = re.search(r"\b([A-Z]{2})\b\s*$", city_candidate)
+            if state_in_city:
+                result["state"] = state_in_city.group(1)
+                city_candidate = clean_value(city_candidate[:state_in_city.start()].strip(" ,"))
+        result["city"] = city_candidate
+        return result
+
+    # Non-comma fallback: split after a street suffix.
+    street_suffix_pattern = (
+        r"\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|blvd|boulevard|drive|dr\.?|"
+        r"lane|ln\.?|way|court|ct\.?|place|pl\.?|parkway|pkwy\.?)\b"
+    )
+    suffix_matches = list(re.finditer(street_suffix_pattern, before_zip, flags=re.IGNORECASE))
+
+    if suffix_matches:
+        last_suffix = suffix_matches[-1]
+        result["street"] = clean_value(before_zip[:last_suffix.end()])
+        city_candidate = clean_value(before_zip[last_suffix.end():].strip(" ,"))
+        result["city"] = city_candidate
+    else:
+        # Last resort: keep the whole value in street so it is visible but never lands in City.
+        result["street"] = before_zip
+
+    return result
+
+
+def normalize_phone_for_tmt(phone: str) -> str:
+    phone = clean_value(phone)
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return phone
+
+
+def prepare_tmt_values_from_matches(matches: list[dict]) -> dict:
+    """
+    Convert reviewed generic matches into exact TMT fields.
+    This prevents unsupported fields like Credit Score, Monthly Revenue, or Years in Business
+    from being written into the wrong TMT boxes.
+    """
+    reviewed = {}
+
+    for match in matches:
+        if not match.get("use"):
+            continue
+
+        destination = clean_value(match.get("destination", ""))
+        value = clean_value(match.get("value", ""))
+
+        if not value or destination == "Do Not Transfer":
+            continue
+
+        reviewed[destination] = value
+
+    tmt_values = {}
+
+    if reviewed.get("Business Name"):
+        tmt_values["business_name"] = reviewed["Business Name"]
+
+    if reviewed.get("Owner Name"):
+        first_name, last_name = split_owner_name_for_tmt(reviewed["Owner Name"])
+        if first_name:
+            tmt_values["first_name"] = first_name
+        if last_name:
+            tmt_values["last_name"] = last_name
+
+    if reviewed.get("Business Address"):
+        parsed_address = parse_business_address_for_tmt(reviewed["Business Address"])
+        if parsed_address.get("street"):
+            tmt_values["business_street"] = parsed_address["street"]
+        if parsed_address.get("state"):
+            tmt_values["business_state"] = parsed_address["state"]
+        if parsed_address.get("city"):
+            tmt_values["business_city"] = parsed_address["city"]
+        if parsed_address.get("zip"):
+            tmt_values["business_zip"] = parsed_address["zip"]
+
+    if reviewed.get("Phone"):
+        tmt_values["phone"] = normalize_phone_for_tmt(reviewed["Phone"])
+
+    if reviewed.get("Email"):
+        tmt_values["email"] = reviewed["Email"]
+
+    if reviewed.get("EIN"):
+        tmt_values["ein"] = reviewed["EIN"]
+
+    if reviewed.get("Business Start Date"):
+        tmt_values["business_start_date"] = reviewed["Business Start Date"]
+
+    # TMT has "Services Sold". The current extraction label is "Industry".
+    # Only write it when the reviewed value looks like services/industry text, not an entity type.
+    industry_value = reviewed.get("Industry", "")
+    if industry_value and industry_value.lower() not in {
+        "llc", "l.l.c.", "corporation", "partnership", "sole proprietor", "sole proprietorship", "other"
+    }:
+        tmt_values["services_sold"] = industry_value
+
+    return tmt_values
 
 
 def draw_text_in_rect(page, rect_tuple, value: str, fontsize: int = 8):
@@ -1505,72 +1675,32 @@ def draw_text_in_rect(page, rect_tuple, value: str, fontsize: int = 8):
     )
 
 
-def write_value_near_label_fallback(doc, destination: str, value: str) -> bool:
-    """
-    Fallback writer if a destination is not in TMT_FIELD_COORDS.
-    This does not replace the TMT coordinate map; it only prevents the flow from failing.
-    """
-    value = clean_value(value)
-    if not value or not destination:
-        return False
-
-    for page in doc:
-        label_hits = page.search_for(destination)
-        for rect in label_hits:
-            x = rect.x1 + 8
-            y = rect.y1 - 2
-
-            if x > page.rect.width - 160:
-                x = rect.x0
-                y = rect.y1 + 14
-
-            page.insert_text(
-                (x, y),
-                value,
-                fontsize=8,
-                color=(0, 0, 0),
-                overlay=True,
-            )
-            return True
-
-    return False
-
-
 def fill_tmt_pdf_with_confirmed_matches(target_pdf_bytes: bytes, matches: list[dict]) -> str:
     """
-    Takes the broker-reviewed confirmed matches and writes them into the TMT blank app.
-    This is intentionally separate from extraction/mapping so Tab 2's working steps stay stable.
+    Takes the broker-reviewed confirmed matches and writes only supported values
+    into exact TMT boxes. Unsupported reviewed fields are intentionally skipped.
     """
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(target_pdf_bytes)
         temp_path = tmp_file.name
 
     doc = fitz.open(temp_path)
+    tmt_values = prepare_tmt_values_from_matches(matches)
 
-    for match in matches:
-        if not match.get("use"):
+    for tmt_key, value in tmt_values.items():
+        coord = TMT_FIELD_COORDS.get(tmt_key)
+        if not coord:
             continue
 
-        destination = match.get("destination", "")
-        value = clean_value(match.get("value", ""))
-
-        if not value or destination == "Do Not Transfer":
-            continue
-
-        coord = TMT_FIELD_COORDS.get(destination)
-
-        if coord:
-            page_index = coord.get("page", 0)
-            if 0 <= page_index < len(doc):
-                page = doc[page_index]
-                draw_text_in_rect(
-                    page,
-                    coord["rect"],
-                    value,
-                    fontsize=coord.get("fontsize", 8),
-                )
-        else:
-            write_value_near_label_fallback(doc, destination, value)
+        page_index = coord.get("page", 0)
+        if 0 <= page_index < len(doc):
+            page = doc[page_index]
+            draw_text_in_rect(
+                page,
+                coord["rect"],
+                value,
+                fontsize=coord.get("fontsize", 8),
+            )
 
     output_path = temp_path.replace(".pdf", "_tmt_filled.pdf")
     doc.save(output_path)
