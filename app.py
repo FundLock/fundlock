@@ -1634,7 +1634,42 @@ def normalize_phone_for_tmt(phone: str) -> str:
     return phone
 
 
-def prepare_tmt_values_from_matches(matches: list[dict]) -> dict:
+
+
+def target_template_has_transfer_field(target_pdf_bytes: bytes, field_type: str) -> bool:
+    """
+    Only allow optional contact transfer when the blank target app actually
+    contains a clear phone/email label. This prevents values from being
+    written into whitespace on templates that do not support those fields.
+    """
+    try:
+        text = extract_pdf_text(target_pdf_bytes).lower()
+    except Exception:
+        return False
+
+    if field_type == "phone":
+        phone_terms = [
+            "phone",
+            "business phone",
+            "cell phone",
+            "mobile",
+            "telephone",
+        ]
+        return any(term in text for term in phone_terms)
+
+    if field_type == "email":
+        email_terms = [
+            "email",
+            "e-mail",
+            "email address",
+            "e-mail address",
+        ]
+        return any(term in text for term in email_terms)
+
+    return False
+
+
+def prepare_tmt_values_from_matches(matches: list[dict], target_pdf_bytes: bytes) -> dict:
     """
     Convert reviewed generic matches into exact TMT fields.
     This prevents unsupported fields like Credit Score, Monthly Revenue, or Years in Business
@@ -1677,10 +1712,10 @@ def prepare_tmt_values_from_matches(matches: list[dict]) -> dict:
         if parsed_address.get("zip"):
             tmt_values["business_zip"] = parsed_address["zip"]
 
-    if reviewed.get("Phone"):
+    if reviewed.get("Phone") and target_template_has_transfer_field(target_pdf_bytes, "phone"):
         tmt_values["phone"] = normalize_phone_for_tmt(reviewed["Phone"])
 
-    if reviewed.get("Email"):
+    if reviewed.get("Email") and target_template_has_transfer_field(target_pdf_bytes, "email"):
         tmt_values["email"] = reviewed["Email"]
 
     if reviewed.get("EIN"):
@@ -1761,7 +1796,7 @@ def fill_tmt_pdf_with_confirmed_matches(target_pdf_bytes: bytes, matches: list[d
         temp_path = tmp_file.name
 
     doc = fitz.open(temp_path)
-    tmt_values = prepare_tmt_values_from_matches(matches)
+    tmt_values = prepare_tmt_values_from_matches(matches, target_pdf_bytes)
 
     for tmt_key, value in tmt_values.items():
         coord = TMT_FIELD_COORDS.get(tmt_key)
