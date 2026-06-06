@@ -149,6 +149,53 @@ def insert_centered_text(page, y, text, fontsize=8, color=(0.25, 0.25, 0.25)):
     )
 
 
+def find_smart_watermark_y(page) -> float:
+    """
+    Pick a near-center watermark position with the least text underneath it.
+
+    The watermark is still kept visually close to center, but may move up/down
+    within a controlled range when the middle of the page contains important text.
+    """
+    rect = page.rect
+    words = page.get_text("words", sort=True)
+
+    # Keep watermark near center only: roughly +/- 15% from center.
+    candidate_positions = [0.35, 0.425, 0.50, 0.575, 0.65]
+
+    # If the PDF has no readable text layer, use a slightly-lower center fallback.
+    # This tends to avoid app header/business-info rows without looking too low.
+    if not words:
+        return rect.height * 0.60
+
+    best_pct = 0.50
+    lowest_score = None
+
+    for pct in candidate_positions:
+        candidate_y = rect.height * pct
+
+        # Score text density around the watermark baseline.
+        # Bigger window catches rows the large watermark would visually cross.
+        band_top = candidate_y - 45
+        band_bottom = candidate_y + 45
+
+        score = 0
+        for word in words:
+            x0, y0, x1, y1, word_text, *_ = word
+            if y1 >= band_top and y0 <= band_bottom:
+                score += 1
+
+        # Prefer lower text overlap. If tied, stay closer to center.
+        if (
+            lowest_score is None
+            or score < lowest_score
+            or (score == lowest_score and abs(pct - 0.50) < abs(best_pct - 0.50))
+        ):
+            lowest_score = score
+            best_pct = pct
+
+    return rect.height * best_pct
+
+
 def insert_responsive_watermark(page, text: str):
     if not text or not text.strip():
         return
@@ -165,7 +212,7 @@ def insert_responsive_watermark(page, text: str):
         text_width = fitz.get_text_length(watermark, fontsize=fontsize)
 
     x = max((rect.width - text_width) / 2, 12)
-    y = rect.height / 2
+    y = find_smart_watermark_y(page)
 
     page.insert_text(
         (x, y),
