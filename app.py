@@ -153,8 +153,10 @@ def find_smart_watermark_y(page) -> float:
     """
     Pick a near-center watermark position with the least text underneath it.
 
-    The watermark is still kept visually close to center, but may move up/down
-    within a controlled range when the middle of the page contains important text.
+    Surgical Tab 1 behavior:
+    - Keep the watermark close to center.
+    - Allow only controlled up/down movement.
+    - Avoid sensitive ID rows like EIN, Tax ID, SSN, and Federal Tax ID.
     """
     rect = page.rect
     words = page.get_text("words", sort=True)
@@ -163,9 +165,28 @@ def find_smart_watermark_y(page) -> float:
     candidate_positions = [0.35, 0.425, 0.50, 0.575, 0.65]
 
     # If the PDF has no readable text layer, use a slightly-lower center fallback.
-    # This tends to avoid app header/business-info rows without looking too low.
+    # This avoids the top form header without pushing the watermark too low.
     if not words:
         return rect.height * 0.60
+
+    sensitive_terms = {
+        "ein",
+        "tax",
+        "taxid",
+        "federal",
+        "ssn",
+        "social",
+        "security",
+    }
+
+    # Build sensitive y-zones from rows containing EIN / Tax ID / SSN style labels.
+    # These zones are heavily penalized so the watermark does not cross key ID fields.
+    sensitive_zones = []
+    for word in words:
+        x0, y0, x1, y1, word_text, *_ = word
+        normalized_word = re.sub(r"[^a-z0-9]", "", str(word_text).lower())
+        if normalized_word in sensitive_terms:
+            sensitive_zones.append((max(0, y0 - 55), min(rect.height, y1 + 55)))
 
     best_pct = 0.50
     lowest_score = None
@@ -179,16 +200,30 @@ def find_smart_watermark_y(page) -> float:
         band_bottom = candidate_y + 45
 
         score = 0
+
         for word in words:
             x0, y0, x1, y1, word_text, *_ = word
             if y1 >= band_top and y0 <= band_bottom:
                 score += 1
 
-        # Prefer lower text overlap. If tied, stay closer to center.
+        # Heavy penalty when the watermark band crosses sensitive ID rows.
+        for zone_top, zone_bottom in sensitive_zones:
+            if band_bottom >= zone_top and band_top <= zone_bottom:
+                score += 1000
+
+        # Gentle preference to move a little higher rather than lower when scores are close.
+        # This helps avoid lower-middle EIN/SSN rows on MCA apps.
+        if pct > 0.50:
+            score += 2
+
+        # Prefer lower text overlap. If tied, stay close to center; if still tied, prefer higher.
         if (
             lowest_score is None
             or score < lowest_score
-            or (score == lowest_score and abs(pct - 0.50) < abs(best_pct - 0.50))
+            or (
+                score == lowest_score
+                and (abs(pct - 0.50), pct) < (abs(best_pct - 0.50), best_pct)
+            )
         ):
             lowest_score = score
             best_pct = pct
