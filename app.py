@@ -116,18 +116,9 @@ def get_replacement(original: str, field_type: str) -> str:
 
 
 def apply_redaction(page, search_text: str, replacement_text: str):
-    """
-    Existing FundLock redaction behavior.
-
-    Surgical note:
-    - This still uses PyMuPDF's built-in replacement text behavior.
-    - Returning the adjusted rectangles lets Tab 1 optionally run an email-only
-      fallback after redactions are applied, without changing the normal GIP path.
-    """
     if not search_text or not search_text.strip():
-        return []
+        return
 
-    applied_rects = []
     matches = page.search_for(search_text)
     for rect in matches:
         adjusted_rect = fitz.Rect(
@@ -144,47 +135,6 @@ def apply_redaction(page, search_text: str, replacement_text: str):
             fill=(1, 1, 1),
             text_color=(0, 0, 0),
         )
-        applied_rects.append(adjusted_rect)
-
-    return applied_rects
-
-
-def insert_email_replacement_fallback(page, rect: fitz.Rect, replacement_text: str):
-    """
-    Email-only safety net for tight/custom email fields.
-
-    Some PDFs can successfully remove the original email but fail to render the
-    replacement text inside a skinny redaction rectangle. This manually redraws
-    the masked email only when the normal replacement did not appear.
-    """
-    replacement_text = clean_value(replacement_text)
-    if not replacement_text:
-        return
-
-    # Slightly expand the original email text box so the masked value has room.
-    # This is intentionally conservative so it lands where the original email was.
-    insert_rect = fitz.Rect(
-        max(0, rect.x0),
-        max(0, rect.y0 - 3),
-        min(page.rect.width, rect.x1 + 90),
-        min(page.rect.height, rect.y1 + 8),
-    )
-
-    fontsize = 8
-    while fontsize > 5:
-        if fitz.get_text_length(replacement_text, fontsize=fontsize) <= max(insert_rect.width - 2, 1):
-            break
-        fontsize -= 0.5
-
-    # Use insert_text instead of another redaction replacement. It is more reliable
-    # on custom lines like the modified TMT email field.
-    page.insert_text(
-        (insert_rect.x0, insert_rect.y1 - 2),
-        replacement_text,
-        fontsize=fontsize,
-        color=(0, 0, 0),
-        overlay=True,
-    )
 
 
 def insert_centered_text(page, y, text, fontsize=8, color=(0.25, 0.25, 0.25)):
@@ -568,20 +518,13 @@ def protect_pdf(
         if watermark:
             insert_responsive_watermark(page, watermark)
 
-        # Email-only fallback queue. Normal redaction still runs first, preserving
-        # existing behavior on apps like GIP where PyMuPDF renders the replacement cleanly.
-        email_fallbacks = []
-
         for merchant_email in merchant_emails:
             if merchant_email.strip():
-                email_replacement = get_replacement(merchant_email, "email")
-                email_rects = apply_redaction(
+                apply_redaction(
                     page,
                     merchant_email,
-                    email_replacement
+                    get_replacement(merchant_email, "email")
                 )
-                for email_rect in email_rects:
-                    email_fallbacks.append((email_rect, email_replacement))
 
         for merchant_phone in merchant_phones:
             if merchant_phone.strip():
@@ -592,16 +535,6 @@ def protect_pdf(
                 )
 
         page.apply_redactions()
-
-        # Surgical email-only safety net:
-        # If the masked email did not make it into the PDF after normal redaction,
-        # manually insert it in the same spot. If normal redaction worked, do nothing.
-        page_text_after_redaction = page.get_text("text")
-        for email_rect, email_replacement in email_fallbacks:
-            if email_replacement and email_replacement not in page_text_after_redaction:
-                insert_email_replacement_fallback(page, email_rect, email_replacement)
-                page_text_after_redaction += f"
-{email_replacement}"
 
     output_path = temp_path.replace(".pdf", "_protected.pdf")
     doc.save(output_path)
