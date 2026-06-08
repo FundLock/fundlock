@@ -2085,14 +2085,14 @@ with tab2:
                     "This uses only the reviewed/confirmed values above and writes them into the TMT blank app."
                 )
 
-                if st.button("Create Filled TMT App", key="create_filled_tmt_app_beta_strict"):
+                if st.button("Create Filled App", key="create_filled_app_beta_strict"):
                     try:
                         filled_pdf_path = fill_tmt_pdf_with_confirmed_matches(
                             st.session_state["tmt_target_pdf_bytes"],
                             st.session_state["tmt_confirmed_transfer_matches"],
                         )
 
-                        st.success("Filled TMT application created.")
+                        st.success("Filled application created.")
 
                         download_name = st.session_state.get(
                             "tmt_target_file_name",
