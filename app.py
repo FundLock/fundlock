@@ -2075,7 +2075,7 @@ with tab2:
                 st.session_state["tmt_target_file_name"] = target_template.name
 
                 st.caption(
-                    "Confirmed. Next step unlocked below: create the filled TMT application from this reviewed map."
+                    "Confirmed. Next step unlocked below: create the filled application from this reviewed map."
                 )
 
             if st.session_state.get("tmt_confirmed_transfer_matches"):
@@ -2095,8 +2095,8 @@ with tab2:
                         st.success("Filled application created.")
 
                         download_name = st.session_state.get(
-                            "tmt_target_file_name",
-                            "TMT_APP_Blank.pdf",
+                            "target_file_name",
+                            "APP_Blank.pdf",
                         ).replace(".pdf", "_filled.pdf")
 
                         with open(filled_pdf_path, "rb") as f:
