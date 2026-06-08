@@ -2082,7 +2082,7 @@ with tab2:
                 st.markdown("---")
                 st.subheader("Next Step: Generate Application")
                 st.caption(
-                    "This uses only the reviewed/confirmed values above and writes them into the TMT blank app."
+                    "This uses only the reviewed/confirmed values above and writes them into the selected application template."
                 )
 
                 if st.button("Create Filled App", key="create_filled_app_beta_strict"):
@@ -2101,7 +2101,7 @@ with tab2:
 
                         with open(filled_pdf_path, "rb") as f:
                             st.download_button(
-                                label="Download Filled TMT Application",
+                                label="Download Completed Application",
                                 data=f,
                                 file_name=download_name,
                                 mime="application/pdf",
