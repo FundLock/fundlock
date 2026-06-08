@@ -2080,7 +2080,7 @@ with tab2:
 
             if st.session_state.get("tmt_confirmed_transfer_matches"):
                 st.markdown("---")
-                st.subheader("Next Step: Create Filled TMT Application")
+                st.subheader("Next Step: Generate Application")
                 st.caption(
                     "This uses only the reviewed/confirmed values above and writes them into the TMT blank app."
                 )
