@@ -2163,7 +2163,7 @@ with tab3:
         factor_rate = st.number_input(
             "Factor rate",
             min_value=1.000,
-            max_value=1.499,
+            max_value=3.000,
             value=1.350,
             step=0.001,
             format="%.3f",
