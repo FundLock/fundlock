@@ -2245,7 +2245,6 @@ with tab3:
         f"Payback amount: {format_money(payback_amount)}\n"
         f"{payment_count} {payment_word} payments of {format_money(payment_amount)}\n"
         f"Net to merchant: {format_money(net_to_merchant)}\n"
-        f"Broker revenue estimate: {format_money(broker_revenue)}"
     )
 
     summary_key = (
