@@ -2133,59 +2133,19 @@ def format_money(value: float) -> str:
         return "$0.00"
 
 
-def calculate_payment_count(duration_value: float, duration_unit: str, payment_frequency: str, daily_basis: str) -> int:
-    """
-    Estimate number of payments for quick MCA quoting.
-
-    Notes:
-    - Daily can use business-day logic or calendar-day logic.
-    - Weekly uses approximate weeks.
-    - Monthly uses approximate months.
-    """
-    if duration_value <= 0:
-        return 0
-
-    duration_unit = duration_unit.lower()
-    payment_frequency = payment_frequency.lower()
-
-    if duration_unit == "days":
-        calendar_days = duration_value
-        business_days = duration_value * (5 / 7)
-        weeks = duration_value / 7
-        months = duration_value / 30.4375
-
-    elif duration_unit == "weeks":
-        calendar_days = duration_value * 7
-        business_days = duration_value * 5
-        weeks = duration_value
-        months = duration_value / 4.345
-
-    else:  # months
-        calendar_days = duration_value * 30.4375
-        business_days = duration_value * 21.75
-        weeks = duration_value * 4.345
-        months = duration_value
-
-    if payment_frequency == "daily":
-        if daily_basis == "Business days":
-            return max(int(round(business_days)), 1)
-        return max(int(round(calendar_days)), 1)
-
-    if payment_frequency == "weekly":
-        return max(int(round(weeks)), 1)
-
-    return max(int(round(months)), 1)
+def format_percent(value: float) -> str:
+    """Format calculator percentages cleanly."""
+    try:
+        return f"{float(value):.3f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
 
 
 with tab3:
 
-    st.subheader("MCA Quick Calc")
+    st.subheader("MCA Calculator")
     st.caption(
-        "Quick broker-side estimate for funding amount, factor rate, payback, payment amount, fees, and commission."
-    )
-
-    st.info(
-        "For quick quoting only. Final terms may vary by funder, underwriting, payment schedule, holidays, and contract structure."
+        "Quick deal math for brokers quoting MCA terms on the phone. Enter the terms, review the snapshot, then copy/paste the deal summary."
     )
 
     calc_col1, calc_col2 = st.columns(2)
@@ -2217,30 +2177,13 @@ with tab3:
             key="mca_calc_payment_frequency",
         )
 
-        daily_basis = "Business days"
-        if payment_frequency == "Daily":
-            daily_basis = st.selectbox(
-                "Daily payment basis",
-                ["Business days", "Calendar days"],
-                index=0,
-                key="mca_calc_daily_basis",
-            )
-
     with calc_col2:
-        duration_value = st.number_input(
-            "Term duration",
-            min_value=1.0,
-            value=90.0,
-            step=1.0,
-            format="%.0f",
-            key="mca_calc_duration_value",
-        )
-
-        duration_unit = st.selectbox(
-            "Duration unit",
-            ["Days", "Weeks", "Months"],
-            index=0,
-            key="mca_calc_duration_unit",
+        payment_count = st.number_input(
+            "Number of payments",
+            min_value=1,
+            value=64,
+            step=1,
+            key="mca_calc_payment_count",
         )
 
         origination_fee_percent = st.number_input(
@@ -2264,59 +2207,54 @@ with tab3:
         )
 
     payback_amount = funding_amount * factor_rate
-    payment_count = calculate_payment_count(
-        duration_value,
-        duration_unit,
-        payment_frequency,
-        daily_basis,
-    )
-
     payment_amount = payback_amount / payment_count if payment_count else 0
     origination_fee_amount = funding_amount * (origination_fee_percent / 100)
     net_to_merchant = max(funding_amount - origination_fee_amount, 0)
     broker_commission_amount = funding_amount * (broker_commission_percent / 100)
+    broker_revenue = broker_commission_amount + origination_fee_amount
     total_cost_of_capital = payback_amount - funding_amount
-    total_fees_and_cost = total_cost_of_capital + origination_fee_amount
 
     st.markdown("---")
     st.subheader("Quote Snapshot")
+
+    hero_col1, hero_col2 = st.columns(2)
+    with hero_col1:
+        st.metric("Net to merchant", format_money(net_to_merchant))
+    with hero_col2:
+        st.metric(f"{payment_count} {payment_frequency} payments", format_money(payment_amount))
 
     metric_col1, metric_col2, metric_col3 = st.columns(3)
 
     with metric_col1:
         st.metric("Payback amount", format_money(payback_amount))
-        st.metric("Net to merchant", format_money(net_to_merchant))
 
     with metric_col2:
-        st.metric(f"{payment_frequency} payment", format_money(payment_amount))
-        st.metric("Number of payments", f"{payment_count}")
+        st.metric("Total cost", format_money(total_cost_of_capital))
 
     with metric_col3:
-        st.metric("Broker commission", format_money(broker_commission_amount))
-        st.metric("Origination fee", format_money(origination_fee_amount))
+        st.metric("Broker revenue", format_money(broker_revenue))
 
-    with st.expander("View deal math", expanded=True):
-        st.write(f"**Funding amount:** {format_money(funding_amount)}")
-        st.write(f"**Factor rate:** {factor_rate:.3f}")
-        st.write(f"**Payback:** {format_money(funding_amount)} × {factor_rate:.3f} = **{format_money(payback_amount)}**")
-        st.write(f"**Estimated {payment_frequency.lower()} payment:** {format_money(payback_amount)} ÷ {payment_count} payments = **{format_money(payment_amount)}**")
-        st.write(f"**Total cost of capital:** {format_money(total_cost_of_capital)}")
-        st.write(f"**Total cost incl. origination fee:** {format_money(total_fees_and_cost)}")
+    st.caption(
+        f"Broker revenue includes {format_money(broker_commission_amount)} commission "
+        f"and {format_money(origination_fee_amount)} origination fee."
+    )
 
     st.markdown("---")
-    st.subheader("Phone Talk Track")
+    st.subheader("Copy/Paste Deal Terms")
+
+    payment_word = payment_frequency.lower()
+    summary_text = (
+        f"Funding amount: {format_money(funding_amount)}\n"
+        f"Factor rate: {format_percent(factor_rate)}\n"
+        f"Payback amount: {format_money(payback_amount)}\n"
+        f"{payment_count} {payment_word} payments of {format_money(payment_amount)}\n"
+        f"Net to merchant: {format_money(net_to_merchant)}\n"
+        f"Broker revenue estimate: {format_money(broker_revenue)}"
+    )
 
     st.text_area(
         "Copy/paste summary",
-        value=(
-            f"Funding amount: {format_money(funding_amount)}\n"
-            f"Factor rate: {factor_rate:.3f}\n"
-            f"Payback amount: {format_money(payback_amount)}\n"
-            f"Estimated {payment_frequency.lower()} payment: {format_money(payment_amount)} "
-            f"for {payment_count} payments\n"
-            f"Net to merchant after origination fee: {format_money(net_to_merchant)}\n"
-            f"Broker commission estimate: {format_money(broker_commission_amount)}"
-        ),
+        value=summary_text,
         height=150,
         key="mca_calc_summary_text",
     )
