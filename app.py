@@ -2212,7 +2212,6 @@ with tab3:
     net_to_merchant = max(funding_amount - origination_fee_amount, 0)
     broker_commission_amount = funding_amount * (broker_commission_percent / 100)
     broker_revenue = broker_commission_amount + origination_fee_amount
-    total_cost_of_capital = payback_amount - funding_amount
 
     st.markdown("---")
     st.subheader("Quote Snapshot")
@@ -2223,15 +2222,12 @@ with tab3:
     with hero_col2:
         st.metric(f"{payment_count} {payment_frequency} payments", format_money(payment_amount))
 
-    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1, metric_col2 = st.columns(2)
 
     with metric_col1:
         st.metric("Payback amount", format_money(payback_amount))
 
     with metric_col2:
-        st.metric("Total cost", format_money(total_cost_of_capital))
-
-    with metric_col3:
         st.metric("Broker revenue", format_money(broker_revenue))
 
     st.caption(
@@ -2252,9 +2248,15 @@ with tab3:
         f"Broker revenue estimate: {format_money(broker_revenue)}"
     )
 
+    summary_key = (
+        f"mca_calc_summary_"
+        f"{funding_amount}_{factor_rate}_{payment_frequency}_{payment_count}_"
+        f"{origination_fee_percent}_{broker_commission_percent}"
+    )
+
     st.text_area(
         "Copy/paste summary",
         value=summary_text,
         height=150,
-        key="mca_calc_summary_text",
+        key=summary_key,
     )
