@@ -11,7 +11,7 @@ st.set_page_config(page_title="FundLock", layout="centered")
 st.title("MCA FundLock 🔒")
 st.write(
     "Protect merchant data. Automate your workflow. Deliver better packages."
-    
+)
  st.write(
     "Build for MCA Brokers, Processors and ISO teams."
 )
