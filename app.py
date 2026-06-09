@@ -9,11 +9,13 @@ import re
 st.set_page_config(page_title="FundLock", layout="centered")
 
 st.title("MCA FundLock 🔒")
+
 st.write(
     "Protect merchant data. Automate your workflow. Deliver better packages."
 )
- st.write(
-    "Build for MCA Brokers, Processors and ISO teams."
+
+st.markdown(
+    "*Built for MCA Brokers, Processors and ISO Teams.*"
 )
 
 tab1, tab2, tab3 = st.tabs([
