@@ -11,7 +11,7 @@ st.set_page_config(page_title="FundLock", layout="centered")
 st.title("MCA FundLock 🔒")
 
 st.write(
-    "Protect merchant data. Transfer applications. Deliver better packages."
+    "Protect sensitive merchant data. Seamless Application Transfer. Deliver lender-ready packages."
 )
 
 st.markdown(
