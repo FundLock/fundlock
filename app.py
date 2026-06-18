@@ -900,7 +900,9 @@ def clean_address_value(value: str) -> str:
         "Home Address",
         "Address",
         "Street",
+        "City/County",
         "City",
+        "County",
         "State",
         "Zip",
     ]:
@@ -1240,11 +1242,19 @@ def parse_business_start_date(start_date: str):
     Accepts:
     - MM/YYYY, like 10/2021
     - M/YYYY, like 3/2020
+    - MM/DD/YYYY, like 03/21/2021
     - YYYY, like 2021
 
     Year-only assumes January of that year.
     """
-    start_date = clean_value(start_date)
+    start_date = clean_value(start_date).replace("-", "/")
+
+    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", start_date):
+        month, day, year = start_date.split("/")
+        month = int(month)
+        year = int(year)
+        if 1 <= month <= 12 and 1900 <= year <= datetime.now().year:
+            return year, month
 
     if re.fullmatch(r"\d{1,2}/\d{4}", start_date):
         month, year = start_date.split("/")
@@ -1259,6 +1269,29 @@ def parse_business_start_date(start_date: str):
             return year, 1
 
     return None
+
+
+def normalize_start_date_for_transfer(start_date: str) -> str:
+    """
+    Normalize GIP-style dates for TMT:
+    - 03/21/2021 -> 03/2021
+    - 3/2021 -> 03/2021
+    - 2021 -> 2021
+    """
+    start_date = clean_value(start_date).replace("-", "/")
+
+    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", start_date):
+        month, day, year = start_date.split("/")
+        return f"{int(month):02d}/{year}"
+
+    if re.fullmatch(r"\d{1,2}/\d{4}", start_date):
+        month, year = start_date.split("/")
+        return f"{int(month):02d}/{year}"
+
+    if re.fullmatch(r"\d{4}", start_date):
+        return start_date
+
+    return ""
 
 
 def extract_years_in_business(start_date: str) -> str:
@@ -1326,7 +1359,7 @@ def field_confidence(field_name: str, value: str) -> str:
         return "High" if is_valid_monthly_sales(raw) else "Needs Review"
 
     if field_name == "Business Start Date":
-        return "High" if is_valid_mm_yyyy(value) else "Needs Review"
+        return "High" if parse_business_start_date(value) is not None else "Needs Review"
 
     if field_name == "EIN":
         return "High" if re.fullmatch(r"\d{2}-\d{7}", value) else "Needs Review"
@@ -1470,7 +1503,7 @@ def extract_dob_from_lines(lines: list[str]) -> str:
 def extract_ownership_percent_from_lines(lines: list[str]) -> str:
     """Extract OWNER 1 ownership %, usually near SSN/DOB row."""
     idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
-    search_lines = lines[idx:min(len(lines), idx + 18)] if idx is not None else lines
+    search_lines = lines[idx:min(len(lines), idx + 24)] if idx is not None else lines
     joined = " ".join(search_lines)
 
     # Common GIP row: 100 089-84-5759 08-22-1978
@@ -1478,13 +1511,22 @@ def extract_ownership_percent_from_lines(lines: list[str]) -> str:
     if match:
         return match.group(1)
 
+    # Common table extraction split across nearby tokens:
+    # Title/Percentage ownership ... 100 ... Social Security No ... 089-84-5759
+    ssn_match = re.search(r"\b\d{3}-\d{2}-\d{4}\b", joined)
+    if ssn_match:
+        before_ssn = joined[max(0, ssn_match.start() - 80):ssn_match.start()]
+        candidates = re.findall(r"\b(100|[1-9]?\d)\b", before_ssn)
+        for candidate in reversed(candidates):
+            if candidate not in {"0"}:
+                return candidate
+
     # Label-style fallback: Ownership % 100
-    match = re.search(r"(?:ownership|ownership\s*%)\D{0,20}(100|[1-9]?\d)\b", joined, flags=re.IGNORECASE)
+    match = re.search(r"(?:ownership|ownership\s*%)\D{0,40}(100|[1-9]?\d)\b", joined, flags=re.IGNORECASE)
     if match:
         return match.group(1)
 
     return ""
-
 
 def extract_home_address_from_lines(lines: list[str]) -> str:
     """Extract OWNER 1 home address only from the OWNER 1 section."""
@@ -1519,13 +1561,14 @@ def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
     emails = detect_masked_or_real_emails(full_text)
     phones = detect_masked_or_real_phones(full_text)
 
-    business_start_date = find_pattern_near_label(
+    raw_business_start_date = find_pattern_near_label(
         lines,
         ["Date/Year Started", "Business Start Date", "Date Established", "In Business Since"],
-        r"\b(\d{1,2}/\d{4}|\d{4})\b",
+        r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{1,2}/\d{4}|\d{4})\b",
         lookahead=5,
         validator=lambda v: parse_business_start_date(v) is not None,
     )
+    business_start_date = normalize_start_date_for_transfer(raw_business_start_date)
 
     monthly_sales = find_pattern_near_label(
         lines,
@@ -1751,6 +1794,42 @@ def split_owner_name_for_tmt(owner_name: str) -> tuple[str, str]:
     return first_name, last_name
 
 
+def clean_tmt_city_value(city: str) -> str:
+    """
+    Clean noisy OCR labels before writing to TMT City boxes.
+    Fixes examples like:
+    - "/County /County Piscataway" -> "Piscataway"
+    - "City/County Piscataway" -> "Piscataway"
+    """
+    city = clean_value(city)
+    if not city:
+        return ""
+
+    city = re.sub(r"(?i)\bcity\s*/?\s*county\b", " ", city)
+    city = re.sub(r"(?i)\bcounty\s*/?\s*county\b", " ", city)
+    city = re.sub(r"(?i)\bcounty\b", " ", city)
+    city = city.replace("/", " ")
+    city = re.sub(r"\s+", " ", city).strip(" ,:-")
+
+    return clean_value(city)
+
+
+def looks_like_unit_or_suite_value(value: str) -> bool:
+    """
+    Prevent apartment/suite/unit numbers from landing in the TMT City box.
+    Example: "132 s 8th st 1074 Pennsylvania 18101" should keep 1074 with the street,
+    not write 1074 as the city.
+    """
+    value = clean_value(value)
+    if not value:
+        return False
+
+    return bool(
+        re.fullmatch(r"(?:apt\s*)?(?:suite\s*)?(?:unit\s*)?#?\d+[A-Za-z]?", value, flags=re.IGNORECASE)
+        or re.fullmatch(r"\d{1,6}", value)
+    )
+
+
 def parse_business_address_for_tmt(address: str) -> dict:
     """
     Split reviewed Business Address into TMT street/state/city/zip boxes.
@@ -1774,6 +1853,7 @@ def parse_business_address_for_tmt(address: str) -> dict:
 
     if not address:
         return result
+
 
     zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", address)
     if zip_match:
@@ -1845,7 +1925,17 @@ def parse_business_address_for_tmt(address: str) -> dict:
         ):
             result["city"] = fallback["city"]
 
+    # Final cleanup before writing into TMT boxes.
+    result["city"] = clean_tmt_city_value(result.get("city", ""))
+
+    # If the parsed "city" is really an apartment/suite/unit number, keep it in street.
+    # This fixes GIP rows like: 132 s 8th st 1074 Pennsylvania 18101.
+    if looks_like_unit_or_suite_value(result.get("city", "")):
+        result["street"] = clean_value(f"{result.get('street', '')} {result.get('city', '')}")
+        result["city"] = ""
+
     return result
+
 
 
 def normalize_phone_for_tmt(phone: str) -> str:
