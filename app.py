@@ -1506,6 +1506,11 @@ def extract_home_address_from_lines(lines: list[str]) -> str:
         following = " ".join(clean_address_value(x) for x in owner_window[i + 1:i + 4])
         combined = clean_value(f"{candidate} {following}")
 
+        # Surgical cleanup: remove OCR city/county labels that can bleed into
+        # OWNER 1 home address rows, e.g. "/County /County Piscataway".
+        combined = re.sub(r"(?i)(city/?county|/?county)", " ", combined)
+        combined = re.sub(r"\s+", " ", combined).strip()
+
         # Keep the home address only when a ZIP is nearby.
         if re.search(r"\b\d{5}\b", combined):
             # Surgical cleanup: stop at the first valid ZIP so trailing labels
