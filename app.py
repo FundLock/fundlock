@@ -705,6 +705,9 @@ DESTINATION_FIELD_OPTIONS = [
     "Business Name",
     "Owner Name",
     "Business Address",
+    "Home Address",
+    "DOB",
+    "Ownership %",
     "Phone",
     "Email",
     "EIN",
@@ -721,7 +724,7 @@ LABEL_WORDS = [
     "legal business name", "business phone number", "business fax number",
     "dba business name", "address", "date/year started", "monthly rent",
     "web address", "email address", "alternate cell phone number",
-    "business address", "street", "city", "state", "zip",
+    "business address", "home address", "birth date", "date of birth", "dob", "ownership", "ownership %", "street", "city", "state", "zip",
     "seasonal business", "tax id number", "nature of business",
     "style of business", "monthly total sales", "avg daily bank balance",
     "use of funds", "advance amount requested", "please fill out completely",
@@ -882,7 +885,7 @@ def looks_like_street_address(value: str) -> bool:
     return bool(
         re.search(r"\b\d{1,6}\b", value)
         and re.search(
-            r"\b(street|st\.|road|rd\.|avenue|ave\.|blvd|boulevard|drive|dr\.|lane|ln\.|way|court|ct\.|main|franks)\b",
+            r"\b(street|st\.?|road|rd\.?|avenue|ave\.?|blvd|boulevard|drive|dr\.?|lane|ln\.?|way|court|ct\.?|place|pl\.?|parkway|pkwy\.?|main|franks)\b",
             value,
             flags=re.IGNORECASE,
         )
@@ -894,6 +897,8 @@ def clean_address_value(value: str) -> str:
     for label in [
         "Business Address: Street",
         "Business Address",
+        "Home Address",
+        "Address",
         "Street",
         "City",
         "State",
@@ -1287,6 +1292,24 @@ def field_confidence(field_name: str, value: str) -> str:
     if is_probably_label_text(value):
         return "Needs Review"
 
+    if field_name == "DOB":
+        if re.fullmatch(r"\d{1,2}[-/]\d{1,2}[-/]\d{4}", value):
+            year = int(value[-4:])
+            return "High" if 1900 <= year <= datetime.now().year - 16 else "Needs Review"
+        return "Needs Review"
+
+    if field_name == "Ownership %":
+        return "High" if re.fullmatch(r"100|[1-9]?\d", value) else "Needs Review"
+
+    if field_name == "Home Address":
+        has_street = looks_like_street_address(value)
+        has_zip = bool(re.search(r"\b\d{5}\b", value))
+        if has_street and has_zip:
+            return "High"
+        if has_street:
+            return "Needs Review"
+        return "Missing"
+
     if field_name == "Email":
         return "High" if re.fullmatch(r"[A-Za-z0-9_*.%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value) else "Needs Review"
 
@@ -1424,6 +1447,71 @@ def extract_requested_funding_amount(lines: list[str]) -> str:
     )
     return format_currency(amount) if amount else ""
 
+
+
+def extract_dob_from_lines(lines: list[str]) -> str:
+    """Extract OWNER 1 DOB without pulling application/signature dates."""
+    idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
+    search_lines = lines[idx:min(len(lines), idx + 18)] if idx is not None else lines
+
+    joined = "\n".join(search_lines)
+    candidates = re.findall(r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{4})\b", joined)
+
+    for candidate in candidates:
+        normalized = candidate.replace("/", "-")
+        # Avoid application/signature dates like 06/15/2026. DOB should not be current/future year.
+        year = int(normalized[-4:])
+        if 1900 <= year <= datetime.now().year - 16:
+            return normalized
+
+    return ""
+
+
+def extract_ownership_percent_from_lines(lines: list[str]) -> str:
+    """Extract OWNER 1 ownership %, usually near SSN/DOB row."""
+    idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
+    search_lines = lines[idx:min(len(lines), idx + 18)] if idx is not None else lines
+    joined = " ".join(search_lines)
+
+    # Common GIP row: 100 089-84-5759 08-22-1978
+    match = re.search(r"\b(100|[1-9]?\d)\s+\d{3}-\d{2}-\d{4}\b", joined)
+    if match:
+        return match.group(1)
+
+    # Label-style fallback: Ownership % 100
+    match = re.search(r"(?:ownership|ownership\s*%)\D{0,20}(100|[1-9]?\d)\b", joined, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def extract_home_address_from_lines(lines: list[str]) -> str:
+    """Extract OWNER 1 home address only from the OWNER 1 section."""
+    idx = find_line_index(lines, ["OWNER 1", "Owner 1"])
+    if idx is None:
+        return ""
+
+    owner_window = lines[idx + 1:min(len(lines), idx + 22)]
+
+    for i, line in enumerate(owner_window):
+        candidate = clean_address_value(line)
+        if not looks_like_street_address(candidate):
+            continue
+
+        # Skip obvious business/entity rows.
+        if re.search(r"\b(llc|inc|corp|corporation|company|funding|business)\b", candidate, flags=re.IGNORECASE):
+            continue
+
+        following = " ".join(clean_address_value(x) for x in owner_window[i + 1:i + 4])
+        combined = clean_value(f"{candidate} {following}")
+
+        # Keep the home address only when a ZIP is nearby.
+        if re.search(r"\b\d{5}\b", combined):
+            return combined
+
+    return ""
+
 def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
     full_text = extract_pdf_text(pdf_bytes)
     lines = extract_pdf_lines_for_transfer(pdf_bytes)
@@ -1463,6 +1551,9 @@ def extract_transfer_fields_strict(pdf_bytes: bytes) -> dict:
         "Business Name": extract_business_name_strict(lines, full_text),
         "Owner Name": extract_owner_name_strict(lines, full_text),
         "Business Address": extract_business_address_strict(lines, full_text),
+        "Home Address": extract_home_address_from_lines(lines),
+        "DOB": extract_dob_from_lines(lines),
+        "Ownership %": extract_ownership_percent_from_lines(lines),
         "Phone": phones[0] if phones else "",
         "Email": emails[0] if emails else "",
         "EIN": ein,
@@ -1485,6 +1576,9 @@ def extract_possible_template_labels(pdf_bytes: bytes) -> list[str]:
         ("Business Name", ["business name", "legal business name"]),
         ("Owner Name", ["owner name", "principal name", "applicant name"]),
         ("Business Address", ["business address", "street address"]),
+        ("Home Address", ["home address", "personal information", "residential address"]),
+        ("DOB", ["dob", "birth date", "date of birth"]),
+        ("Ownership %", ["ownership", "ownership %"]),
         ("Phone", ["phone", "cell phone", "business phone"]),
         ("Email", ["email"]),
         ("EIN", ["ein", "tax id"]),
@@ -1578,8 +1672,16 @@ TMT_FIELD_COORDS = {
     "business_zip": {"page": 0, "rect": (482, 356, 552, 377), "fontsize": 8, "min_fontsize": 5.5},
     "business_start_date": {"page": 0, "rect": (58, 406, 190, 428), "fontsize": 8, "min_fontsize": 5.5},
 
+    # Personal Information section
+    "home_street": {"page": 0, "rect": (58, 264, 270, 286), "fontsize": 7, "min_fontsize": 5.0},
+    "home_state": {"page": 0, "rect": (287, 264, 345, 286), "fontsize": 8, "min_fontsize": 5.5},
+    "home_city": {"page": 0, "rect": (365, 264, 466, 286), "fontsize": 7, "min_fontsize": 5.0},
+    "home_zip": {"page": 0, "rect": (482, 264, 552, 286), "fontsize": 8, "min_fontsize": 5.5},
+
     # Ownership Verification section
+    "dob": {"page": 0, "rect": (58, 506, 165, 527), "fontsize": 8, "min_fontsize": 5.5},
     "ein": {"page": 0, "rect": (327, 506, 438, 527), "fontsize": 7, "min_fontsize": 5.0},
+    "ownership_percent": {"page": 0, "rect": (462, 506, 552, 527), "fontsize": 8, "min_fontsize": 5.5},
 }
 
 # Tiny visual nudges by TMT box.
@@ -1596,7 +1698,29 @@ TMT_FIELD_OFFSETS = {
     "business_city": (4, 2),
     "business_zip": (4, 2),
     "business_start_date": (4, 2),
+    "home_street": (8, 2),
+    "home_state": (4, 2),
+    "home_city": (4, 2),
+    "home_zip": (4, 2),
+    "dob": (4, 2),
     "ein": (4, 2),
+    "ownership_percent": (4, 2),
+}
+
+STATE_NAME_TO_ABBR = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY",
 }
 
 # Minimal ZIP rescue for common TMT test output where OCR returns
@@ -1658,8 +1782,20 @@ def parse_business_address_for_tmt(address: str) -> dict:
     else:
         before_zip = address
 
+    # Accept full state names from GIP extraction, e.g. "Pennsylvania 18101" or "New Jersey 08854".
+    for state_name, abbr in STATE_NAME_TO_ABBR.items():
+        if re.search(rf"\b{re.escape(state_name)}\b$", before_zip, flags=re.IGNORECASE):
+            result["state"] = abbr
+            before_zip = re.sub(
+                rf"\b{re.escape(state_name)}\b$",
+                "",
+                before_zip,
+                flags=re.IGNORECASE,
+            ).strip(" ,")
+            break
+
     state_match = re.search(r"\b([A-Z]{2})\b\s*$", before_zip)
-    if state_match:
+    if state_match and not result.get("state"):
         result["state"] = state_match.group(1)
         before_zip = clean_value(before_zip[:state_match.start()].strip(" ,"))
 
@@ -1806,8 +1942,25 @@ def prepare_tmt_values_from_matches(matches: list[dict], target_pdf_bytes: bytes
     if reviewed.get("Email") and target_template_has_transfer_field(target_pdf_bytes, "email"):
         tmt_values["email"] = reviewed["Email"]
 
+    if reviewed.get("Home Address"):
+        parsed_home = parse_business_address_for_tmt(reviewed["Home Address"])
+        if parsed_home.get("street"):
+            tmt_values["home_street"] = parsed_home["street"]
+        if parsed_home.get("state"):
+            tmt_values["home_state"] = parsed_home["state"]
+        if parsed_home.get("city"):
+            tmt_values["home_city"] = parsed_home["city"]
+        if parsed_home.get("zip"):
+            tmt_values["home_zip"] = parsed_home["zip"]
+
+    if reviewed.get("DOB"):
+        tmt_values["dob"] = reviewed["DOB"]
+
     if reviewed.get("EIN"):
         tmt_values["ein"] = reviewed["EIN"]
+
+    if reviewed.get("Ownership %"):
+        tmt_values["ownership_percent"] = reviewed["Ownership %"]
 
     if reviewed.get("Business Start Date"):
         tmt_values["business_start_date"] = reviewed["Business Start Date"]
@@ -1993,6 +2146,9 @@ with tab2:
                 "Business Name",
                 "Owner Name",
                 "Business Address",
+                "Home Address",
+                "DOB",
+                "Ownership %",
                 "Phone",
                 "Email",
                 "EIN",
